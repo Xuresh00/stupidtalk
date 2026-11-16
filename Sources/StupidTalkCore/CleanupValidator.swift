@@ -71,8 +71,9 @@ public enum CleanupValidator {
         let cleaned = sanitize(modelOutput, raw: raw)
         guard !cleaned.isEmpty else { return .rejected("empty answer") }
 
-        let rawTokens = Words.tokens(raw)
-        let outTokens = Words.tokens(cleaned)
+        // "- " and "1. " in front of list items are layout, not words.
+        let rawTokens = Words.tokens(withoutListMarkers(raw))
+        let outTokens = Words.tokens(withoutListMarkers(cleaned))
         guard !outTokens.isEmpty else { return .rejected("answer has no words") }
         guard !rawTokens.isEmpty else { return .rejected("nothing was said") }
 
@@ -109,6 +110,11 @@ public enum CleanupValidator {
             return .rejected("answer does not follow what was said")
         }
         return .accepted(cleaned)
+    }
+
+    /// Takes away the bullets and numbers at the start of list lines.
+    static func withoutListMarkers(_ text: String) -> String {
+        text.replacingRegex("(?m)^[ \\t]*(?:[-*\u{2022}]|\\d{1,2}[.)])[ \\t]+", with: "")
     }
 
     /// How many words of `a` also appear in `b`, in the same order (longest common subsequence),

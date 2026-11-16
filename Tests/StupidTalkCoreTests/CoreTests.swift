@@ -476,3 +476,102 @@ struct FastPathTests {
     }
 }
 
+@Suite("Spoken commands")
+struct SpokenCommandTests {
+    private let none = Vocabulary(entries: [])
+
+    private func cleaned(_ text: String) -> String {
+        CleanupPipeline.plan(prepared: CleanupPipeline.prepare(raw: text, vocabulary: none), vocabulary: none).ruleText
+    }
+
+    @Test func lineBreaksAndParagraphs() {
+        #expect(cleaned("banana, new line, potato") == "Banana\nPotato")
+        #expect(cleaned("Dear Sam. New paragraph. The file is ready.") == "Dear Sam.\n\nThe file is ready.")
+        #expect(cleaned("first line new line second line") == "First line\nSecond line")
+    }
+
+    @Test func bullets() {
+        #expect(cleaned("Shopping list, new line, bullet point eggs bullet point milk, bullet point bread") == "Shopping list\n- Eggs\n- Milk\n- Bread")
+        #expect(cleaned("bullet point apples bullet point oranges") == "- Apples\n- Oranges")
+    }
+
+    @Test func brackets() {
+        #expect(cleaned("I'll meet you at the market, open bracket, the big one, close bracket, tomorrow.") == "I'll meet you at the market (the big one) tomorrow.")
+        #expect(cleaned("Bring the charger open bracket the white one close bracket.") == "Bring the charger (the white one).")
+    }
+
+    @Test func punctuationWords() {
+        #expect(cleaned("is it ready question mark") == "Is it ready?")
+        #expect(cleaned("Send it today full stop thanks a lot exclamation mark") == "Send it today. Thanks a lot!")
+        #expect(cleaned("we need milk comma eggs comma and bread") == "We need milk, eggs, and bread")
+    }
+
+    @Test func leavesNormalSentencesAlone() {
+        let untouched = [
+            "We are launching a new line of shoes.",
+            "The car came to a full stop.",
+            "The comma is missing.",
+            "That bullet point is too long.",
+            "Read the new paragraph first.",
+            "The right bracket for your income is lower."
+        ]
+        for text in untouched {
+            #expect(cleaned(text) == text, "changed: \(text)")
+        }
+    }
+
+    @Test func runningTheRulesTwiceChangesNothing() {
+        let samples = [
+            "um so send it to Sam on Monday, no wait, Tuesday, new line, thanks",
+            "Shopping list new line bullet point eggs bullet point milk",
+            "the market open bracket the big one close bracket is closed"
+        ]
+        for sample in samples {
+            let once = cleaned(sample)
+            #expect(CleanupPipeline.ruleCleaned(once, vocabulary: none) == once, "not stable: \(sample)")
+        }
+    }
+}
+
+@Suite("Polished answers the checker accepts")
+struct PolishTests {
+    private let none = Vocabulary(entries: [])
+
+    @Test func aListIsAccepted() {
+        let raw = "Let's make a list. Let's add, banana, potato milk, bread."
+        let answer = "Let's make a list:\n- Banana\n- Potato\n- Milk\n- Bread"
+        #expect(CleanupValidator.validate(raw: raw, modelOutput: answer) == .accepted(answer))
+        let piece = CleanupPipeline.resolve(chunk: raw, modelOutput: answer, vocabulary: none)
+        #expect(piece == CleanupPipeline.Piece(text: answer, usedAI: true))
+    }
+
+    @Test func numberedStepsAreAccepted() {
+        let raw = "first open the app second press record third talk"
+        let answer = "1. Open the app.\n2. Press record.\n3. Talk."
+        #expect(CleanupValidator.validate(raw: raw, modelOutput: answer) == .accepted(answer))
+    }
+
+    @Test func smallGrammarFixesAreAccepted() {
+        let raw = "The only problem is that when I release the key, it's ask me to paste it."
+        let answer = "The only problem is that when I release the key, it asks me to paste it."
+        #expect(CleanupValidator.validate(raw: raw, modelOutput: answer) == .accepted(answer))
+    }
+
+    @Test func bracketsAreAccepted() {
+        let raw = "I'll meet you at the market which is the big one tomorrow"
+        let answer = "I'll meet you at the market (the big one) tomorrow."
+        #expect(CleanupValidator.validate(raw: raw, modelOutput: answer) == .accepted(answer))
+    }
+
+    @Test func aListCannotSneakInNewItems() {
+        let raw = "add milk and bread to the list"
+        let answer = "Add to the list:\n- Milk\n- Bread\n- Eggs\n- Butter\n- Cheese\n- Apples\n- Rice"
+        #expect(CleanupValidator.validate(raw: raw, modelOutput: answer) != .accepted(answer))
+    }
+
+    @Test func stillNoAnswersToQuestions() {
+        let raw = "What is the capital of France?"
+        #expect(CleanupValidator.validate(raw: raw, modelOutput: "The capital of France is Paris.") != .accepted("The capital of France is Paris."))
+    }
+}
+

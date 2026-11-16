@@ -23,15 +23,15 @@ enum DictationPhase: Equatable {
 
 /// When the on-device model is asked to help.
 enum AIMode: String, CaseIterable {
-    /// Rules do the clean-up at once. The model only looks at a self-correction the rules are unsure about.
-    case smart
-    /// The model rewrites every dictation. More polish, more waiting.
+    /// The model polishes every dictation: lists, brackets, grammar, punctuation. Usually well under a second.
     case always
+    /// Rules only, unless you correct yourself in a way the rules are not sure about. The fastest.
+    case smart
 
     var title: String {
         switch self {
-        case .smart: return "Only when I correct myself"
         case .always: return "On every dictation"
+        case .smart: return "Only when I correct myself"
         }
     }
 }
@@ -123,7 +123,7 @@ final class AppState: ObservableObject {
 
         hotkey = HotkeyChoice(rawValue: defaults.string(forKey: Keys.hotkey) ?? "") ?? .rightOption
         aiCleanupEnabled = defaults.object(forKey: Keys.aiCleanup) as? Bool ?? true
-        aiMode = AIMode(rawValue: defaults.string(forKey: Keys.aiMode) ?? "") ?? .smart
+        aiMode = AIMode(rawValue: defaults.string(forKey: Keys.aiMode) ?? "") ?? .always
         microphone = MicrophoneChoice(rawValue: defaults.string(forKey: Keys.microphone) ?? "") ?? .builtIn
         localeIdentifier = defaults.string(forKey: Keys.locale) ?? AppState.defaultLocaleIdentifier()
         keepOnClipboard = defaults.object(forKey: Keys.keepOnClipboard) as? Bool ?? false

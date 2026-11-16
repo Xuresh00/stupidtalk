@@ -58,6 +58,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             controller.start()
 
+            // Without Accessibility StupidTalk can only copy, not paste. macOS shows its own
+            // "allow" dialog for this. After a new build the old permission no longer counts.
+            if !state.accessibilityGranted {
+                Log.info("Accessibility is not allowed yet. Asking macOS to show its dialog.")
+                Permissions.promptForAccessibility()
+            }
             // First run, or a permission went missing: show the setup checklist.
             if !state.setupFinished || state.microphonePermission != .granted || !state.accessibilityGranted {
                 windows.showSetup()

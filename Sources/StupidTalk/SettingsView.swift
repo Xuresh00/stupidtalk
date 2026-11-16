@@ -231,11 +231,11 @@ struct SettingsView: View {
         title("Clean-up", "Mr. Oops tidies what you said before he types it. It all happens on this Mac.")
 
         Card {
-            SettingRow("AI clean-up", detail: "The on-device model helps when you correct yourself or stumble. Switch it off and only the instant, rule-based clean-up runs.") {
+            SettingRow("AI clean-up", detail: "The on-device model makes lists, adds brackets, fixes small grammar mistakes and punctuation. Switch it off and only the instant, rule-based clean-up runs.") {
                 switchControl($state.aiCleanupEnabled)
             }
             Divide()
-            SettingRow("When to use the AI", detail: "Only when I correct myself: the text is typed at once, and the model only steps in for a correction the rules are not sure about. On every dictation: more polish, but you wait a few seconds each time.") {
+            SettingRow("When to use the AI", detail: "On every dictation: lists, brackets and grammar get fixed. It usually takes well under a second, and never more than about 2 for a sentence or two. Only when I correct myself: the fastest, with rules doing almost everything.") {
                 Picker("", selection: $state.aiMode) {
                     ForEach(AIMode.allCases, id: \.self) { mode in
                         Text(mode.title).tag(mode)
@@ -271,7 +271,8 @@ struct SettingsView: View {
             Text("How it stays fast and honest")
                 .font(Brand.heading(14))
                 .foregroundStyle(Brand.cream)
-            bullet("Speed first. Clear corrections like \"on Monday, no wait, Tuesday\" are fixed by rule, with no waiting. The model gets a short time limit, and if it is too slow your words are typed without it.")
+            bullet("Speed first. The model gets a short time limit. If it is too slow, your words are typed with the rule-based clean-up instead.")
+            bullet("Say \"new line\", \"new paragraph\", \"bullet point\", \"open bracket\" and \"close bracket\", \"comma\", \"full stop\" or \"question mark\" and they are done for you.")
             bullet("It cleans. It never answers. Dictate a question and it stays a question.")
             bullet("Every answer is checked against what you said. If it added things, summarized, or wandered off, it is thrown away and your words are typed with the basic clean-up instead.")
             bullet("Your original words are always kept. Menu bar, then \"Copy what I actually said\".")
@@ -282,7 +283,7 @@ struct SettingsView: View {
             Text("Basic clean-up (always on)")
                 .font(Brand.heading(14))
                 .foregroundStyle(Brand.cream)
-            Text("Removes um and uh, fixes \"the the\", applies clear self-corrections (\"no wait\", \"scratch that\"), tidies punctuation and applies your word list. It is instant and runs on every dictation.")
+            Text("Removes um and uh, fixes \"the the\", applies clear self-corrections (\"no wait\", \"scratch that\") and spoken commands (\"new line\", \"open bracket\"), tidies punctuation and applies your word list. It is instant and runs on every dictation.")
                 .font(Brand.text(13))
                 .foregroundStyle(Brand.muted)
                 .fixedSize(horizontal: false, vertical: true)

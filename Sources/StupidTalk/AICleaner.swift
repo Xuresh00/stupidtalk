@@ -115,50 +115,43 @@ final class AICleaner {
         }
     }
 
-    /// "On every dictation" mode: the model rewrites the whole text, piece by piece.
-    /// When the time runs out, the pieces that are left get the rule-based clean-up.
-    func cleanAll(prepared: String, vocabulary: Vocabulary, budget: Double) async -> CleanupPipeline.Piece {
+    /// "On every dictation": the model polishes the rule-cleaned text, piece by piece.
+    /// When the time runs out, the pieces that are left are typed as the rules left them.
+    func polish(ruleText: String, vocabulary: Vocabulary, budget: Double) async -> CleanupPipeline.Piece {
         let deadline = Date().addingTimeInterval(budget)
         let words = vocabulary.words
         var pieces: [CleanupPipeline.Piece] = []
-        for chunk in TextChunker.chunks(prepared, maxWords: CleanupPrompt.maxWordsPerChunk) {
-            let rules = CleanupPipeline.plan(prepared: chunk, vocabulary: vocabulary).ruleText
-            guard CleanupPipeline.wantsAI(chunk) else {
-                // A couple of leftover words. Nothing for the model to do.
-                pieces.append(CleanupPipeline.Piece(text: rules, usedAI: true))
+        for chunk in TextChunker.chunks(ruleText, maxWords: CleanupPrompt.maxWordsPerChunk) {
+            guard CleanupPipeline.wantsPolish(chunk) else {
+                // A couple of words. Nothing for the model to do.
+                pieces.append(CleanupPipeline.Piece(text: chunk, usedAI: true))
                 continue
             }
             let left = deadline.timeIntervalSinceNow
             guard left > 0.3 else {
-                pieces.append(CleanupPipeline.Piece(text: rules, usedAI: false, note: "out of time"))
+                pieces.append(CleanupPipeline.Piece(text: chunk, usedAI: false, note: "out of time"))
                 continue
             }
             let reply = await answer(for: chunk, words: words, budget: left)
             var piece = CleanupPipeline.resolve(chunk: chunk, modelOutput: reply, vocabulary: vocabulary)
-            if !piece.usedAI { piece.text = rules }
+            if !piece.usedAI { piece.text = chunk }
             pieces.append(piece)
         }
         return CleanupPipeline.join(pieces)
     }
 
-    /// Times two small clean-ups and writes the result to the log: the first one right after
-    /// loading, the second one with everything warm. It tells how fast the model is on this Mac.
-    func speedTest(words: [String]) async {
+    /// One small clean-up right after launch, so the first real dictation is not the slow one.
+    /// The time it took goes to the log.
+    func warmUpWithSample(words: [String]) async {
         guard status.isReady else {
-            Log.info("AI speed test skipped: the on-device model is not available")
+            Log.info("AI warm-up skipped: the on-device model is not available")
             return
         }
         let sample = "um so we could meet on Monday no wait Tuesday at like 3 pm in the the office"
-        for round in ["first", "second"] {
-            let loading = Date()
-            warmUp(words: words)
-            let loaded = Date()
-            let reply = await answer(for: sample, words: words, budget: 30)
-            let done = Date()
-            let loadTime = Int((loaded.timeIntervalSince(loading) * 1000).rounded())
-            let answerTime = Int((done.timeIntervalSince(loaded) * 1000).rounded())
-            let result = reply.map { "\(Words.count($0)) words back" } ?? "no answer"
-            Log.info("AI speed test (\(round)): get ready \(loadTime) ms, answer \(answerTime) ms for \(Words.count(sample)) words, \(result)")
-        }
+        warmUp(words: words)
+        let started = Date()
+        let reply = await answer(for: sample, words: words, budget: 30)
+        let took = Int((Date().timeIntervalSince(started) * 1000).rounded())
+        Log.info("AI warm-up: answered in \(took) ms\(reply == nil ? ", no answer" : "")")
     }
 }

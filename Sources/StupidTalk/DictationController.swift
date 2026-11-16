@@ -12,9 +12,16 @@ import StupidTalkCore
 @MainActor
 final class DictationController {
     /// How long the model may take for one unsure self-correction before the rule-based text is typed.
-    private static let smartBudget = 2.5
-    /// How long the model may take in "on every dictation" mode.
-    private static let alwaysBudget = 8.0
+    private static let smartBudget = 2.0
+
+    /// How long the model may polish a dictation of this many words before the rule-based text is typed.
+    /// A sentence or two gets 2 seconds at most. Usually it needs well under one.
+    private static func polishBudget(words: Int) -> Double {
+        min(4.0, 1.5 + 0.015 * Double(words))
+    }
+
+    /// The "allow Accessibility" hint opens the setup window only once per launch.
+    private var askedForAccessibility = false
 
     private let state: AppState
     private let windows: WindowCoordinator
@@ -119,7 +126,7 @@ final class DictationController {
                 // Let the app finish starting first.
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 cleaner.refreshStatus()
-                await cleaner.speedTest(words: words)
+                await cleaner.warmUpWithSample(words: words)
             }
             cleaner.warmUp(words: words)
         }
@@ -429,12 +436,13 @@ final class DictationController {
                 var how = plan.repairs > 0 ? "rules (\(plan.repairs) self-correction fixed)" : "rules"
 
                 let modelReady = self.state.aiCleanupEnabled && self.cleaner.status.isReady
-                if modelReady, self.state.aiMode == .always, CleanupPipeline.wantsAI(prepared) {
+                if modelReady, self.state.aiMode == .always, CleanupPipeline.wantsPolish(plan.ruleText) {
                     self.state.phase = .cleaning
                     self.overlay.show(.cleaning("Cleaning up"))
                     let started = Date()
-                    piece = await self.cleaner.cleanAll(prepared: prepared, vocabulary: vocabulary, budget: Self.alwaysBudget)
-                    how = "AI on everything, \(Self.ms(since: started)) ms"
+                    let budget = Self.polishBudget(words: Words.count(plan.ruleText))
+                    piece = await self.cleaner.polish(ruleText: plan.ruleText, vocabulary: vocabulary, budget: budget)
+                    how = "AI polish on \(Words.count(plan.ruleText)) words, \(Self.ms(since: started)) ms"
                 } else if modelReady, let window = plan.window {
                     self.state.phase = .cleaning
                     self.overlay.show(.cleaning("Cleaning up"))
@@ -484,7 +492,13 @@ final class DictationController {
             if state.playSounds { Sounds.done() }
             overlay.flash(.done, seconds: 0.9)
         case .copiedOnly:
-            overlay.flash(.message("Copied. Press \u{2318}V to paste.", .point), seconds: 3)
+            // macOS has not allowed StupidTalk to paste. The text is on the clipboard meanwhile.
+            overlay.flash(.message("Copied. Allow Accessibility so I can paste for you.", .point), seconds: 3.5)
+            if !askedForAccessibility {
+                askedForAccessibility = true
+                Permissions.promptForAccessibility()
+                windows.showSetup()
+            }
         }
         end(session)
         // Load a fresh model session for the next time.

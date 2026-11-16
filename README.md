@@ -11,7 +11,8 @@ Made by [Stupidesigner](https://stupidesigner.com). Stupid talk. Smart text.
 ## What it does
 
 - **Hold to talk.** Hold Right Option (or Right Command, or Fn), speak, let go. The text is typed at your cursor in any app: mail, chat, docs, the browser, your editor.
-- **Clean-up that keeps up.** Fillers go ("um", "uh"). Repeated words are dropped. When you change your mind mid-sentence ("on Monday, no wait, Tuesday"), only the final version stays. The clear cases are fixed by rule, at once. For the unclear ones the model that ships with macOS steps in, with a short time limit.
+- **Clean-up that keeps up.** Fillers go ("um", "uh"). Repeated words are dropped. When you change your mind mid-sentence ("on Monday, no wait, Tuesday"), only the final version stays. Small grammar mistakes and punctuation get fixed. The model that ships with macOS does the polish, usually in well under a second, and it has a short time limit so it never holds you up.
+- **Lists, brackets and line breaks.** Dictate a list and it is typed as a list, one item per line. Say "new line", "new paragraph", "bullet point", "open bracket" and "close bracket", "comma", "full stop" or "question mark" and it is done for you, without the words.
 - **Your own word list.** Teach it the names it keeps getting wrong, like your brand or your clients. Add the right spelling and what it tends to hear instead.
 - **Your original words are always kept.** Every dictation is saved in both versions, so you can copy what you actually said. You can also switch the AI off, or let it polish every dictation.
 - **Runs on your Mac.** Speech to text and the clean-up both use the models that ship with macOS. Nothing is uploaded, and there is no server.
@@ -48,7 +49,7 @@ Example:
 Good to know:
 
 - A quick tap does nothing. Pressing any other key while you hold cancels the dictation, so normal shortcuts keep working. Escape cancels too.
-- Most dictations never wait for the model. It only steps in when you correct yourself in a way the rules are not sure about. In Settings you can let it polish every dictation instead, which takes longer.
+- The model polishes every dictation of four words or more. For the fastest typing, set it to "Only when I correct myself" in Settings, Clean-up.
 - Click Mr. Oops in the menu bar for **Paste last result again**, **Copy what I actually said**, the history, the word list and the settings.
 - In Settings you can change the key, the microphone, your English accent, and whether a space is added after each dictation.
 - By default it uses the Mac's own microphone, which is meant to keep AirPods in music quality. Pick "System default" if you use an external mic.
@@ -78,7 +79,7 @@ Permissions it asks for: **Microphone** and **Accessibility**. Accessibility is 
 
 - English only in this version.
 - The rules only fix self-corrections they are sure about. An unclear one waits a moment for the model, and when the model is too slow it is typed the way you said it.
-- "On every dictation" mode makes you wait for the model each time.
+- The polish adds a short wait: usually well under a second, about 2 seconds at most for a sentence or two, more for very long dictations.
 - The clean-up will sometimes guess wrong. That is why the original is kept.
 - Text is inserted by pasting (Command-V), like most dictation apps. On keyboard layouts where V is in a different place, the paste may not land. Your clipboard is put back afterwards.
 - The app is ad-hoc signed and not notarized. After you update it, macOS may ask for the permissions again. If the key stops working after an update, switch StupidTalk off and on under Privacy & Security, Accessibility.

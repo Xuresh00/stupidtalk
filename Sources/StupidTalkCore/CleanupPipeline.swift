@@ -31,8 +31,9 @@ public enum CleanupPipeline {
         Words.count(prepared) >= CleanupPrompt.minimumWordsForAI
     }
 
+    /// Spoken commands, fillers, repeats, punctuation and the word list. Instant.
     public static func ruleCleaned(_ prepared: String, vocabulary: Vocabulary) -> String {
-        vocabulary.applyReplacements(to: RuleCleaner.clean(prepared))
+        vocabulary.applyReplacements(to: RuleCleaner.clean(SpokenCommands.apply(prepared)))
     }
 
     /// Decides what to type for one chunk, given what the model returned (or nil when it failed).
@@ -42,7 +43,9 @@ public enum CleanupPipeline {
         }
         switch CleanupValidator.validate(raw: chunk, modelOutput: modelOutput) {
         case .accepted(let cleaned):
-            return Piece(text: vocabulary.applyReplacements(to: cleaned), usedAI: true, note: nil)
+            // The model may leave a spoken command as words. Apply it anyway.
+            let text = vocabulary.applyReplacements(to: SpokenCommands.applyLayout(cleaned))
+            return Piece(text: text, usedAI: true, note: nil)
         case .rejected(let reason):
             return Piece(text: ruleCleaned(chunk, vocabulary: vocabulary), usedAI: false, note: reason)
         }
@@ -66,7 +69,8 @@ public enum CleanupPipeline {
 
     /// The fast path: fixes what can be fixed with no model at all.
     public static func plan(prepared: String, vocabulary: Vocabulary) -> Plan {
-        let outcome = SelfCorrection.repair(prepared)
+        // Spoken punctuation first, so "comma" can mark where a self-correction starts.
+        let outcome = SelfCorrection.repair(SpokenCommands.applyPunctuation(prepared))
         return Plan(
             ruleText: ruleCleaned(outcome.text, vocabulary: vocabulary),
             repairs: outcome.applied,
@@ -90,6 +94,12 @@ public enum CleanupPipeline {
             ruleCleaned(window.after, vocabulary: vocabulary)
         ]
         return Piece(text: parts.filter { !$0.isEmpty }.joined(separator: " "), usedAI: true, note: nil)
+    }
+
+    /// True when the text is worth sending to the model at all.
+    /// Used by "on every dictation": a few words with nothing to fix are typed at once.
+    public static func wantsPolish(_ ruleText: String) -> Bool {
+        Words.count(ruleText) >= CleanupPrompt.minimumWordsForAI
     }
 
     /// Puts cleaned chunks back together.
