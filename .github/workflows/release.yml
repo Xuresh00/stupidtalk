@@ -1,0 +1,32 @@
+name: Release
+
+# Runs when a version tag such as v0.1.0 is pushed. Builds the app and attaches it to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the clean-up logic
+        run: scripts/test.sh
+
+      - name: Build StupidTalk.app
+        run: scripts/build.sh dist
+        env:
+          STUPIDTALK_BUILD_NUMBER: ${{ github.run_number }}
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/StupidTalk-*.zip \
+            --title "StupidTalk ${GITHUB_REF_NAME#v}" \
+            --generate-notes

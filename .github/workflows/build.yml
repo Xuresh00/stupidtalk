@@ -1,0 +1,41 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mac-app:
+    name: Test and build the Mac app
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          sw_vers
+          swift --version
+          xcodebuild -version
+
+      - name: Test the clean-up logic
+        run: scripts/test.sh
+
+      - name: Build StupidTalk.app
+        run: scripts/build.sh dist
+        env:
+          STUPIDTALK_BUILD_NUMBER: ${{ github.run_number }}
+
+      - name: Upload the app
+        uses: actions/upload-artifact@v4
+        with:
+          name: StupidTalk
+          path: dist/StupidTalk-*.zip
+          if-no-files-found: error
+          retention-days: 14

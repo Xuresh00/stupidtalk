@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>StupidTalk</string>
+    <key>CFBundleDisplayName</key>
+    <string>StupidTalk</string>
+    <key>CFBundleExecutable</key>
+    <string>StupidTalk</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.stupidesigner.StupidTalk</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__BUILD__</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>26.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.productivity</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>© 2026 Suresh Kumar (Stupidesigner). MIT licensed.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>StupidTalk listens only while you hold the hold-to-talk key, and turns what you say into text on this Mac.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>StupidTalk turns your speech into text on this Mac. Nothing is sent anywhere.</string>
+</dict>
+</plist>
