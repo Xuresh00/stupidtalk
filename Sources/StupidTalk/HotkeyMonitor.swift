@@ -37,6 +37,19 @@ final class HotkeyMonitor {
         }
     }
 
+    /// Asks macOS directly whether the hold-to-talk key is down right now.
+    /// A safety net for the rare case where the "key released" event never arrives.
+    func isKeyDown() -> Bool {
+        // Either source saying "down" counts, so a dictation is never cut short by mistake.
+        NSEvent.modifierFlags.contains(choice.modifier)
+            || CGEventSource.keyState(.combinedSessionState, key: choice.keyCode)
+    }
+
+    /// Forget a hold whose release was noticed by `isKeyDown` and not by an event.
+    func forgetHold() {
+        machine.reset()
+    }
+
     func stop() {
         if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
@@ -59,6 +72,26 @@ final class HotkeyMonitor {
         }
         if action != .none {
             onAction?(action)
+        }
+    }
+}
+
+extension HotkeyChoice {
+    /// The modifier this key belongs to, left or right.
+    var modifier: NSEvent.ModifierFlags {
+        switch self {
+        case .rightOption: return .option
+        case .rightCommand: return .command
+        case .fn: return .function
+        }
+    }
+
+    /// The key's hardware code (Carbon virtual key codes).
+    var keyCode: CGKeyCode {
+        switch self {
+        case .rightOption: return 61
+        case .rightCommand: return 54
+        case .fn: return 63
         }
     }
 }

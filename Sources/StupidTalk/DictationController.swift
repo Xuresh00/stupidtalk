@@ -5,8 +5,17 @@ import StupidTalkCore
 
 /// Runs one dictation from start to finish:
 /// hold the key, record, speech to text, clean up, paste at the cursor.
+///
+/// Speed comes first. The text is typed as soon as it has been heard and tidied by rule.
+/// The on-device model is only asked when you corrected yourself in a way the rules are
+/// not sure about, and it always has a time limit.
 @MainActor
 final class DictationController {
+    /// How long the model may take for one unsure self-correction before the rule-based text is typed.
+    private static let smartBudget = 2.5
+    /// How long the model may take in "on every dictation" mode.
+    private static let alwaysBudget = 8.0
+
     private let state: AppState
     private let windows: WindowCoordinator
     private let hotkeys: HotkeyMonitor
@@ -19,6 +28,8 @@ final class DictationController {
 
     private var current: Session?
     private var statusTimer: Timer?
+    private var releaseTimer: Timer?
+    private var ticks = 0
 
     /// Everything that belongs to one press of the hold-to-talk key.
     private final class Session {
@@ -29,6 +40,12 @@ final class DictationController {
         /// The key came up (or the dictation was cancelled). No more audio is wanted.
         var released = false
         var cancelled = false
+        var releasedAt: Date?
+        /// Keeps macOS from slowing the app down while a dictation is running.
+        var activity: NSObjectProtocol?
+        /// For the safety net that notices a key release macOS did not report.
+        var sawKeyDown = false
+        var missedPolls = 0
 
         init(targetApp: String?) {
             self.targetApp = targetApp
@@ -59,9 +76,10 @@ final class DictationController {
             await self.loadLocales()
             await self.prepareSpeech()
         }
+        warmUpAI(speedTest: true)
     }
 
-    /// Re-reads permissions and model availability. Cheap, so it runs every couple of seconds.
+    /// Re-reads permissions. Cheap, so it runs every couple of seconds.
     func refreshStatus() {
         let wasGranted = state.accessibilityGranted
         let microphone = Permissions.microphone
@@ -73,9 +91,38 @@ final class DictationController {
             hotkeys.start()
             Log.info("Accessibility permission granted")
         }
-        let ai = cleaner.status()
+        // The on-device model is asked about in the background, never here on the main thread.
+        ticks += 1
+        if ticks % 15 == 0 { refreshAIStatus() }
+        let ai = cleaner.status
         if state.aiStatus != ai { state.aiStatus = ai }
         if hotkeys.choice != state.hotkey { hotkeys.choice = state.hotkey }
+    }
+
+    private func refreshAIStatus() {
+        let cleaner = self.cleaner
+        Task.detached(priority: .utility) {
+            cleaner.refreshStatus()
+        }
+    }
+
+    /// Gets the on-device model loaded in the background so it is ready when it is needed.
+    private func warmUpAI(speedTest: Bool = false) {
+        guard state.aiCleanupEnabled else {
+            refreshAIStatus()
+            return
+        }
+        let cleaner = self.cleaner
+        let words = state.vocabulary.words
+        Task.detached(priority: .userInitiated) {
+            if speedTest {
+                // Let the app finish starting first.
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                cleaner.refreshStatus()
+                await cleaner.speedTest(words: words)
+            }
+            cleaner.warmUp(words: words)
+        }
     }
 
     private func loadLocales() async {
@@ -91,9 +138,14 @@ final class DictationController {
             return
         }
         state.speechStatus = status
-        guard status == .ready else { return }
+        guard status == .ready else {
+            Log.info("Speech model is not ready")
+            return
+        }
         do {
+            let started = Date()
             try await speech.prepare(localeIdentifier: identifier)
+            Log.info("Speech model loaded in \(Self.ms(since: started)) ms")
         } catch {
             Log.info("Could not load the speech model: \(error.localizedDescription)")
         }
@@ -135,8 +187,8 @@ final class DictationController {
         case .granted:
             refreshStatus()
         case .notAsked:
-            Permissions.requestMicrophone { _ in
-                Task { @MainActor [weak self] in
+            Permissions.requestMicrophone { [weak self] _ in
+                Task { @MainActor in
                     self?.refreshStatus()
                 }
             }
@@ -175,6 +227,19 @@ final class DictationController {
         inserter.copy(text)
     }
 
+    /// Puts the latest timings on the clipboard. It holds numbers only, never what was said.
+    func copySpeedReport() {
+        var lines = ["StupidTalk \(AppInfo.version) speed report"]
+        lines.append("macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
+        lines.append("Key: \(state.hotkey.shortTitle). AI clean-up: \(state.aiCleanupEnabled ? state.aiMode.title : "off"). Model: \(state.aiStatus.isReady ? "ready" : "not ready").")
+        if let problem = Log.problem {
+            lines.append("The log file could not be written: \(problem)")
+        }
+        lines.append("")
+        lines.append(contentsOf: Log.recent)
+        inserter.copy(lines.joined(separator: "\n"))
+    }
+
     // MARK: The dictation itself
 
     private func handle(_ action: HoldToTalk.Action) {
@@ -187,40 +252,46 @@ final class DictationController {
     }
 
     private func begin() {
-        // Still busy with the previous dictation.
-        guard current == nil else { return }
+        guard current == nil else {
+            Log.info("Key pressed while the last dictation was still being typed")
+            return
+        }
 
         guard Permissions.microphone == .granted else {
+            Log.info("Key pressed, but the microphone is not allowed yet")
             problem("I need the microphone first.", openSetup: true)
             return
         }
         guard state.speechStatus == .ready else {
+            Log.info("Key pressed, but the speech model is not ready")
             problem("The speech model isn't ready yet.", openSetup: true)
             return
         }
 
         let session = Session(targetApp: NSWorkspace.shared.frontmostApplication?.localizedName)
+        // A menu bar app with no window is the first thing macOS slows down. Not during a dictation.
+        session.activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .latencyCritical],
+            reason: "Dictation"
+        )
         current = session
         state.phase = .listening
         overlay.show(.listening)
         if state.playSounds { Sounds.start() }
+        Log.info("Listening")
 
         let words = state.vocabulary.words
         let locale = state.localeIdentifier
-        let useAI = state.aiCleanupEnabled
 
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
         session.continuation = continuation
         let speech = self.speech
-        session.transcription = Task {
+        session.transcription = Task(priority: .userInitiated) {
             try await speech.transcribe(stream: stream, localeIdentifier: locale, vocabulary: words)
         }
-        if useAI {
-            let cleaner = self.cleaner
-            Task.detached(priority: .utility) {
-                cleaner.warmUp(words: words)
-            }
-        }
+        // Have the model loaded by the time you stop talking, in case it is needed.
+        warmUpAI()
+        watchForRelease(session)
 
         if let format = speech.analyzerFormat {
             startRecording(session, format: format)
@@ -257,22 +328,58 @@ final class DictationController {
                     }
                 }
             },
-            completion: { error in
+            completion: { [weak self] error in
                 guard let error else { return }
-                Task { @MainActor [weak self] in
+                Task { @MainActor in
                     self?.fail(session, error: error)
                 }
             }
         )
     }
 
+    /// Safety net: if macOS never reports the key coming up, notice it by asking for the key's state.
+    private func watchForRelease(_ session: Session) {
+        releaseTimer?.invalidate()
+        releaseTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.checkRelease(session)
+            }
+        }
+    }
+
+    private func stopWatchingForRelease() {
+        releaseTimer?.invalidate()
+        releaseTimer = nil
+    }
+
+    private func checkRelease(_ session: Session) {
+        guard current === session, !session.released else {
+            stopWatchingForRelease()
+            return
+        }
+        if hotkeys.isKeyDown() {
+            session.sawKeyDown = true
+            session.missedPolls = 0
+            return
+        }
+        // Only trust "the key is up" on keyboards where "the key is down" was seen first.
+        guard session.sawKeyDown else { return }
+        session.missedPolls += 1
+        guard session.missedPolls >= 3 else { return }
+        Log.info("macOS did not report the key release. Noticed it by checking the key.")
+        hotkeys.forgetHold()
+        finish()
+    }
+
     private func finish() {
         guard let session = current, !session.released else { return }
         session.released = true
+        session.releasedAt = Date()
+        stopWatchingForRelease()
         state.phase = .transcribing
         overlay.show(.thinking)
-        recorder.stop {
-            Task { @MainActor [weak self] in
+        recorder.stop { [weak self] in
+            Task { @MainActor in
                 session.continuation?.finish()
                 self?.process(session)
             }
@@ -283,6 +390,8 @@ final class DictationController {
         guard let session = current, !session.released else { return }
         session.released = true
         session.cancelled = true
+        stopWatchingForRelease()
+        Log.info("Cancelled")
         recorder.stop {
             Task { @MainActor in
                 session.continuation?.finish()
@@ -298,58 +407,77 @@ final class DictationController {
             end(session)
             return
         }
-        Task { @MainActor in
+        Task(priority: .userInitiated) { @MainActor in
             do {
                 let heard: String = try await Race.withTimeout(seconds: 45) {
                     try await transcription.value
                 }
+                let heardAt = Date()
                 let raw = heard.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !raw.isEmpty else {
+                    Log.info("Heard nothing. \(self.timing(session, heardAt: heardAt))")
                     self.overlay.flash(.message("I didn't catch that.", .confused), seconds: 1.6)
                     self.end(session)
                     return
                 }
 
+                // The fast path: word list, self-corrections the rules are sure about, fillers, punctuation.
                 let vocabulary = self.state.vocabulary
                 let prepared = CleanupPipeline.prepare(raw: raw, vocabulary: vocabulary)
-                let piece: CleanupPipeline.Piece
-                if self.state.aiCleanupEnabled, self.cleaner.status().isReady, CleanupPipeline.wantsAI(prepared) {
+                let plan = CleanupPipeline.plan(prepared: prepared, vocabulary: vocabulary)
+                var piece = CleanupPipeline.Piece(text: plan.ruleText, usedAI: false)
+                var how = plan.repairs > 0 ? "rules (\(plan.repairs) self-correction fixed)" : "rules"
+
+                let modelReady = self.state.aiCleanupEnabled && self.cleaner.status.isReady
+                if modelReady, self.state.aiMode == .always, CleanupPipeline.wantsAI(prepared) {
                     self.state.phase = .cleaning
                     self.overlay.show(.cleaning("Cleaning up"))
-                    let overlay = self.overlay
-                    piece = await self.cleaner.clean(prepared: prepared, vocabulary: vocabulary) { index, count in
-                        guard count > 1 else { return }
-                        Task { @MainActor in
-                            overlay.show(.cleaning("Cleaning up \(index) of \(count)"))
-                        }
-                    }
-                } else {
-                    piece = CleanupPipeline.Piece(text: CleanupPipeline.ruleCleaned(prepared, vocabulary: vocabulary), usedAI: false)
+                    let started = Date()
+                    piece = await self.cleaner.cleanAll(prepared: prepared, vocabulary: vocabulary, budget: Self.alwaysBudget)
+                    how = "AI on everything, \(Self.ms(since: started)) ms"
+                } else if modelReady, let window = plan.window {
+                    self.state.phase = .cleaning
+                    self.overlay.show(.cleaning("Cleaning up"))
+                    let started = Date()
+                    let reply = await self.cleaner.answer(for: window.middle, words: vocabulary.words, budget: Self.smartBudget)
+                    piece = CleanupPipeline.finish(plan: plan, modelOutput: reply, vocabulary: vocabulary)
+                    how = "AI on \(Words.count(window.middle)) words, \(Self.ms(since: started)) ms"
+                } else if plan.window != nil {
+                    how += ", one correction left as said"
                 }
-                self.deliver(piece, raw: raw, session: session)
+                self.deliver(piece, raw: raw, session: session, heardAt: heardAt, how: how)
             } catch {
                 self.fail(session, error: error)
             }
         }
     }
 
-    private func deliver(_ piece: CleanupPipeline.Piece, raw: String, session: Session) {
+    private func deliver(_ piece: CleanupPipeline.Piece, raw: String, session: Session, heardAt: Date, how: String) {
         guard !piece.text.isEmpty else {
+            Log.info("Nothing left to type after the clean-up. \(timing(session, heardAt: heardAt))")
             overlay.flash(.message("I didn't catch that.", .confused), seconds: 1.6)
             end(session)
             return
         }
-        let seconds = Date().timeIntervalSince(session.startedAt)
         let text = state.addTrailingSpace ? piece.text + " " : piece.text
         let result = inserter.insert(text, keepOnClipboard: state.keepOnClipboard)
-        state.record(HistoryEntry(raw: raw, cleaned: piece.text, usedAI: piece.usedAI, appName: session.targetApp, seconds: seconds))
+        let typedAt = Date()
+        let wait = typedAt.timeIntervalSince(session.releasedAt ?? typedAt)
+        state.record(HistoryEntry(
+            raw: raw,
+            cleaned: piece.text,
+            usedAI: piece.usedAI,
+            appName: session.targetApp,
+            seconds: typedAt.timeIntervalSince(session.startedAt),
+            wait: wait
+        ))
 
-        let words = Words.count(piece.text)
-        if let note = piece.note {
-            Log.info("Dictation done: \(words) words in \(String(format: "%.1f", seconds))s, rule-based clean-up (\(note))")
-        } else {
-            Log.info("Dictation done: \(words) words in \(String(format: "%.1f", seconds))s, \(piece.usedAI ? "AI clean-up" : "rule-based clean-up")")
-        }
+        var line = "Typed \(Words.count(piece.text)) words \(Self.ms(wait)) ms after the key came up. "
+        line += timing(session, heardAt: heardAt)
+        line += " Clean-up: \(how)."
+        if let note = piece.note { line += " Model answer not used: \(note)." }
+        if result == .copiedOnly { line += " Only copied, Accessibility is missing." }
+        Log.info(line)
 
         switch result {
         case .pasted:
@@ -359,12 +487,15 @@ final class DictationController {
             overlay.flash(.message("Copied. Press \u{2318}V to paste.", .point), seconds: 3)
         }
         end(session)
+        // Load a fresh model session for the next time.
+        warmUpAI()
     }
 
     private func fail(_ session: Session, error: Error) {
         Log.info("Dictation failed: \(error.localizedDescription)")
         session.released = true
         session.cancelled = true
+        stopWatchingForRelease()
         recorder.stop {
             Task { @MainActor in
                 session.continuation?.finish()
@@ -403,8 +534,32 @@ final class DictationController {
     }
 
     private func end(_ session: Session) {
-        if current === session { current = nil }
+        if let activity = session.activity {
+            ProcessInfo.processInfo.endActivity(activity)
+            session.activity = nil
+        }
+        if current === session {
+            current = nil
+            stopWatchingForRelease()
+        }
         state.phase = .idle
+    }
+
+    // MARK: Timing, for the log
+
+    private static func ms(_ seconds: TimeInterval) -> Int {
+        Int((seconds * 1000).rounded())
+    }
+
+    private static func ms(since start: Date) -> Int {
+        ms(Date().timeIntervalSince(start))
+    }
+
+    /// "Talked 4.2 s, heard 310 ms after the key came up."
+    private func timing(_ session: Session, heardAt: Date) -> String {
+        let released = session.releasedAt ?? heardAt
+        let talked = String(format: "%.1f", released.timeIntervalSince(session.startedAt))
+        return "Talked \(talked) s, heard \(Self.ms(heardAt.timeIntervalSince(released))) ms after the key came up."
     }
 
     private static func friendly(_ error: Error) -> String {

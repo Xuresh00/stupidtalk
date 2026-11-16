@@ -22,11 +22,12 @@ jobs:
         run: scripts/build.sh dist
         env:
           STUPIDTALK_BUILD_NUMBER: ${{ github.run_number }}
+          STUPIDTALK_DMG_DIR: dist
 
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/StupidTalk-*.zip \
+          gh release create "$GITHUB_REF_NAME" dist/StupidTalk-*.dmg dist/StupidTalk-*.zip \
             --title "StupidTalk ${GITHUB_REF_NAME#v}" \
             --generate-notes

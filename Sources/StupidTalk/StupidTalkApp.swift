@@ -32,11 +32,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainActor.assumeIsolated {
-            if self.anotherCopyIsRunning() {
+            if self.anotherCopyStaysOpen() {
+                Log.info("Another copy of StupidTalk is already running. This one quits.")
                 NSApp.terminate(nil)
                 return
             }
-            Log.info("StupidTalk \(AppInfo.version) started")
+            // A menu bar app has no window most of the time. Without this, macOS is allowed to
+            // quietly close such an app whenever it likes, and it would stop listening for the key.
+            ProcessInfo.processInfo.disableAutomaticTermination("StupidTalk waits for its hold-to-talk key")
+            ProcessInfo.processInfo.disableSuddenTermination()
+            Log.info("StupidTalk \(AppInfo.version) started on macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
             Assets.registerFonts()
             NSApp.setActivationPolicy(.accessory)
 
@@ -64,6 +69,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        // If the log ever shows a start with no "quitting" before it, something closed the app from outside.
+        Log.info("StupidTalk is quitting")
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showSettings()
         return true
@@ -75,9 +85,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func anotherCopyIsRunning() -> Bool {
+    /// True when another copy is running and is not on its way out.
+    ///
+    /// When macOS reopens the app (for example right after a permission change), the old copy
+    /// can still be closing for a moment. Quitting at once would leave no copy running at all,
+    /// so this waits a few seconds for the old one to go.
+    private func anotherCopyStaysOpen() -> Bool {
         guard let identifier = Bundle.main.bundleIdentifier else { return false }
         let mine = ProcessInfo.processInfo.processIdentifier
-        return NSRunningApplication.runningApplications(withBundleIdentifier: identifier).contains { $0.processIdentifier != mine }
+        func others() -> [NSRunningApplication] {
+            NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
+                .filter { $0.processIdentifier != mine && !$0.isTerminated }
+        }
+        var waited = 0.0
+        while !others().isEmpty, waited < 4 {
+            Thread.sleep(forTimeInterval: 0.2)
+            waited += 0.2
+        }
+        return !others().isEmpty
     }
 }

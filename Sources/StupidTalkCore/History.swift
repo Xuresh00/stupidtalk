@@ -11,9 +11,12 @@ public struct HistoryEntry: Codable, Equatable, Identifiable, Sendable {
     /// True when the on-device AI cleaned this one. False means the rule-based clean-up was used.
     public var usedAI: Bool
     public var appName: String?
+    /// From pressing the key to the text being typed.
     public var seconds: Double
+    /// From letting go of the key to the text being typed. Missing in entries saved by 0.1.0.
+    public var wait: Double?
 
-    public init(id: UUID = UUID(), date: Date = Date(), raw: String, cleaned: String, usedAI: Bool, appName: String? = nil, seconds: Double = 0) {
+    public init(id: UUID = UUID(), date: Date = Date(), raw: String, cleaned: String, usedAI: Bool, appName: String? = nil, seconds: Double = 0, wait: Double? = nil) {
         self.id = id
         self.date = date
         self.raw = raw
@@ -21,6 +24,7 @@ public struct HistoryEntry: Codable, Equatable, Identifiable, Sendable {
         self.usedAI = usedAI
         self.appName = appName
         self.seconds = seconds
+        self.wait = wait
     }
 }
 

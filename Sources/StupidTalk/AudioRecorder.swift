@@ -39,11 +39,15 @@ final class AudioRecorder {
         }
     }
 
-    /// `completion` is called on the main thread once the microphone is really off.
+    /// `completion` is called on the main thread as soon as no more audio is coming.
+    /// Shutting the audio engine down happens after that, so it does not hold the text back.
     func stop(completion: @escaping @Sendable () -> Void) {
         queue.async {
-            self.stopOnQueue()
+            let engine = self.engine
+            self.engine = nil
+            engine?.inputNode.removeTap(onBus: 0)
             DispatchQueue.main.async { completion() }
+            engine?.stop()
         }
     }
 

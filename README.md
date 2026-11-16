@@ -11,9 +11,9 @@ Made by [Stupidesigner](https://stupidesigner.com). Stupid talk. Smart text.
 ## What it does
 
 - **Hold to talk.** Hold Right Option (or Right Command, or Fn), speak, let go. The text is typed at your cursor in any app: mail, chat, docs, the browser, your editor.
-- **AI clean-up.** Fillers go ("um", "uh", "you know"). When you change your mind mid-sentence, only the final version stays. Misspoken and repeated words are dropped. Misheard words, spelling and punctuation are fixed.
+- **Clean-up that keeps up.** Fillers go ("um", "uh"). Repeated words are dropped. When you change your mind mid-sentence ("on Monday, no wait, Tuesday"), only the final version stays. The clear cases are fixed by rule, at once. For the unclear ones the model that ships with macOS steps in, with a short time limit.
 - **Your own word list.** Teach it the names it keeps getting wrong, like your brand or your clients. Add the right spelling and what it tends to hear instead.
-- **Your original words are always kept.** Every dictation is saved in both versions, so you can copy what you actually said. There is also a switch to turn the AI clean-up off.
+- **Your original words are always kept.** Every dictation is saved in both versions, so you can copy what you actually said. You can also switch the AI off, or let it polish every dictation.
 - **Runs on your Mac.** Speech to text and the clean-up both use the models that ship with macOS. Nothing is uploaded, and there is no server.
 
 Example:
@@ -30,8 +30,8 @@ Example:
 
 ## Install
 
-1. Download `StupidTalk-x.y.z.zip` from the [Releases](https://github.com/Xuresh00/stupidtalk/releases) page and unzip it.
-2. Drag **StupidTalk** into your Applications folder and open it.
+1. Download `StupidTalk-x.y.z.dmg` from the [Releases](https://github.com/Xuresh00/stupidtalk/releases) page and open it.
+2. Drag **StupidTalk** onto the Applications shortcut, then open it from your Applications folder.
 3. macOS will say it cannot check the app, because it is not notarized by Apple. Open **System Settings, Privacy & Security**, scroll down, and click **Open Anyway**. You only do this once.
 4. Mr. Oops appears in the menu bar and the setup checklist opens. It walks you through four things:
    - **Microphone**, so it can hear you. It only listens while you hold the key.
@@ -48,7 +48,7 @@ Example:
 Good to know:
 
 - A quick tap does nothing. Pressing any other key while you hold cancels the dictation, so normal shortcuts keep working. Escape cancels too.
-- Short bits like "yes" or "sounds good" skip the AI and appear right away.
+- Most dictations never wait for the model. It only steps in when you correct yourself in a way the rules are not sure about. In Settings you can let it polish every dictation instead, which takes longer.
 - Click Mr. Oops in the menu bar for **Paste last result again**, **Copy what I actually said**, the history, the word list and the settings.
 - In Settings you can change the key, the microphone, your English accent, and whether a space is added after each dictation.
 - By default it uses the Mac's own microphone, which is meant to keep AirPods in music quality. Pick "System default" if you use an external mic.
@@ -57,12 +57,12 @@ Good to know:
 
 A language model can do the wrong job. Ask it to clean "what is the capital of France" and it may answer the question instead. StupidTalk guards against that:
 
-1. Your word list is applied first.
-2. The on-device model is asked to clean the transcript, nothing else.
+1. Your word list is applied first, and the rules fix what they are sure about: fillers, repeats, punctuation and clear self-corrections. Most dictations are done here and typed at once.
+2. Only a self-correction the rules are not sure about goes to the on-device model, and only that part of the text. It is asked to clean it, nothing else, and it gets a short time limit.
 3. The answer is checked against what you said. A real clean-up is mostly your own words, in the same order, with pieces removed. If the answer is longer than what you said, drops most of it, apologizes, answers a question, or wanders off, it is thrown away.
-4. When an answer is thrown away, your words are typed with the basic clean-up instead (fillers, accidental repeats, punctuation, word list).
+4. When an answer is thrown away or comes too late, your words are typed with the rule-based clean-up instead.
 
-So the worst case is a dictation that is a little less polished, never one that says something you did not say. The rules live in [`CleanupValidator.swift`](Sources/StupidTalkCore/CleanupValidator.swift) and are covered by tests.
+So the worst case is a dictation that is a little less polished, never one that says something you did not say. The checks live in [`CleanupValidator.swift`](Sources/StupidTalkCore/CleanupValidator.swift), the self-correction rules in [`SelfCorrection.swift`](Sources/StupidTalkCore/SelfCorrection.swift), and both are covered by tests.
 
 ## Privacy
 
@@ -77,7 +77,8 @@ Permissions it asks for: **Microphone** and **Accessibility**. Accessibility is 
 ## Limits, said plainly
 
 - English only in this version.
-- The AI clean-up adds a short wait after you stop talking. Long dictations are cleaned in pieces, so they take longer.
+- The rules only fix self-corrections they are sure about. An unclear one waits a moment for the model, and when the model is too slow it is typed the way you said it.
+- "On every dictation" mode makes you wait for the model each time.
 - The clean-up will sometimes guess wrong. That is why the original is kept.
 - Text is inserted by pasting (Command-V), like most dictation apps. On keyboard layouts where V is in a different place, the paste may not land. Your clipboard is put back afterwards.
 - The app is ad-hoc signed and not notarized. After you update it, macOS may ask for the permissions again. If the key stops working after an update, switch StupidTalk off and on under Privacy & Security, Accessibility.
@@ -90,8 +91,9 @@ You need macOS 26 or newer and Swift 6 (Xcode, or only the Command Line Tools).
 git clone https://github.com/Xuresh00/stupidtalk.git
 cd stupidtalk
 scripts/test.sh                  # tests for the clean-up logic
-scripts/build.sh                 # makes dist/StupidTalk.app and a zip
-scripts/build.sh ~/Applications  # or build straight into a folder
+scripts/build.sh                                  # makes dist/StupidTalk.app and a zip
+scripts/build.sh /Applications                    # or build straight into a folder
+STUPIDTALK_DMG_DIR=dist scripts/build.sh          # also makes dist/StupidTalk-x.y.z.dmg
 ```
 
 How the code is laid out:

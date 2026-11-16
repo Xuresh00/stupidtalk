@@ -28,37 +28,68 @@ enum AppInfo {
 
 /// A plain text log for troubleshooting. It records what happened and how long it took,
 /// never what you said.
+///
+/// Lines are written straight away, and the last ones are also kept in memory, so a speed
+/// report can still be copied when the file cannot be written.
 enum Log {
-    private static let queue = DispatchQueue(label: "com.stupidesigner.stupidtalk.log")
+    private static let lock = NSLock()
     private static let maxBytes = 512 * 1024
+    private static let keep = 80
     private static let formatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
+    private static var lines: [String] = []
+    private static var writeProblem: String?
 
     static var fileURL: URL { AppInfo.logDirectory.appendingPathComponent("stupidtalk.log") }
 
+    /// The latest lines, newest last.
+    static var recent: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return lines
+    }
+
+    /// Why the log file could not be written, when it could not.
+    static var problem: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return writeProblem
+    }
+
     static func info(_ message: String) {
-        let stamp = Date()
-        queue.async {
-            let line = "\(formatter.string(from: stamp)) \(message)\n"
-            let manager = FileManager.default
-            let url = fileURL
-            try? manager.createDirectory(at: AppInfo.logDirectory, withIntermediateDirectories: true)
-            if let size = (try? manager.attributesOfItem(atPath: url.path))?[.size] as? Int, size > maxBytes {
-                let old = AppInfo.logDirectory.appendingPathComponent("stupidtalk.old.log")
-                try? manager.removeItem(at: old)
-                try? manager.moveItem(at: url, to: old)
-            }
-            guard let data = line.data(using: .utf8) else { return }
-            if let handle = try? FileHandle(forWritingTo: url) {
-                defer { try? handle.close() }
-                _ = try? handle.seekToEnd()
-                try? handle.write(contentsOf: data)
-            } else {
-                try? data.write(to: url)
-            }
+        let line = "\(formatter.string(from: Date())) \(message)"
+        lock.lock()
+        defer { lock.unlock() }
+        lines.append(line)
+        if lines.count > keep { lines.removeFirst(lines.count - keep) }
+        do {
+            try append(line + "\n")
+            writeProblem = nil
+        } catch {
+            writeProblem = error.localizedDescription
+        }
+    }
+
+    private static func append(_ text: String) throws {
+        let manager = FileManager.default
+        let url = fileURL
+        try manager.createDirectory(at: AppInfo.logDirectory, withIntermediateDirectories: true)
+        if let size = (try? manager.attributesOfItem(atPath: url.path))?[.size] as? Int, size > maxBytes {
+            let old = AppInfo.logDirectory.appendingPathComponent("stupidtalk.old.log")
+            try? manager.removeItem(at: old)
+            try? manager.moveItem(at: url, to: old)
+        }
+        let data = Data(text.utf8)
+        if manager.fileExists(atPath: url.path) {
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+        } else {
+            try data.write(to: url)
         }
     }
 }

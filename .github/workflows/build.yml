@@ -31,11 +31,14 @@ jobs:
         run: scripts/build.sh dist
         env:
           STUPIDTALK_BUILD_NUMBER: ${{ github.run_number }}
+          STUPIDTALK_DMG_DIR: dist
 
       - name: Upload the app
         uses: actions/upload-artifact@v4
         with:
           name: StupidTalk
-          path: dist/StupidTalk-*.zip
+          path: |
+            dist/StupidTalk-*.dmg
+            dist/StupidTalk-*.zip
           if-no-files-found: error
           retention-days: 14

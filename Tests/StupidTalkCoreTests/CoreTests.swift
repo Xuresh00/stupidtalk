@@ -333,3 +333,146 @@ struct HistoryAndPipelineTests {
         #expect(Words.editDistance("cat", "elephant", limit: 2) == 3)
     }
 }
+
+@Suite("Self-corrections fixed by rule")
+struct SelfCorrectionTests {
+    private func fixed(_ text: String) -> String {
+        let outcome = SelfCorrection.repair(text)
+        #expect(outcome.unresolved == 0, "left unresolved: \(text)")
+        #expect(outcome.window == nil)
+        return outcome.text
+    }
+
+    @Test func swapsTheLastWordInTheMiddleOfASentence() {
+        #expect(fixed("send it on Monday, no wait, Tuesday") == "send it on Tuesday")
+        #expect(fixed("I'll send the report today, no wait, tomorrow.") == "I'll send the report tomorrow.")
+    }
+
+    @Test func swapsANumberOrNameThatIsNotTheLastWord() {
+        #expect(fixed("we need five copies, make that six") == "we need six copies")
+        #expect(fixed("We need 5 copies, no wait, 6.") == "We need 6 copies.")
+        #expect(fixed("send it to John tomorrow, no wait, Sam") == "send it to Sam tomorrow")
+        #expect(fixed("Send it to me, no wait, Sam.") == "Send it to Sam.")
+        #expect(fixed("Book a table for Friday at 7, no wait, Saturday.") == "Book a table for Saturday at 7.")
+    }
+
+    @Test func swapsAcrossAFullStopWhenTheWordsAreTheSameKind() {
+        #expect(fixed("Let's meet at 5 pm. No wait, 6 pm.") == "Let's meet at 6 pm.")
+        #expect(fixed("Send it to John. No wait, Sam.") == "Send it to Sam.")
+        #expect(fixed("It costs 500. No, wait, 600.") == "It costs 600.")
+    }
+
+    @Test func restartsFromAWordYouAlreadySaid() {
+        #expect(fixed("call John, no wait, call Sam about the invoice") == "call Sam about the invoice")
+        #expect(fixed("I will go to the store, sorry I mean, to the market") == "I will go to the market")
+        #expect(fixed("I like it. No wait, I love it.") == "I love it.")
+    }
+
+    @Test func keepsTheRestOfTheSentence() {
+        #expect(fixed("on Monday, no wait, Tuesday, and bring the laptop") == "on Tuesday, and bring the laptop")
+        #expect(fixed("Hi Sam. See you Monday, no wait, Tuesday. Bye.") == "Hi Sam. See you Tuesday. Bye.")
+    }
+
+    @Test func scratchThatThrowsAwayTheSentenceBefore() {
+        #expect(fixed("Send the invoice today. Scratch that. Send it tomorrow.") == "Send it tomorrow.")
+        #expect(fixed("Hi Sam. Send it today, scratch that, send it tomorrow.") == "Hi Sam. send it tomorrow.")
+    }
+
+    @Test func fixesTwoCorrectionsInARow() {
+        #expect(fixed("on Monday, no wait, Tuesday, no wait, Wednesday") == "on Wednesday")
+    }
+
+    @Test func leavesNormalSpeechAlone() {
+        let untouched = [
+            "There is no wait time at the clinic.",
+            "Don't go. No, wait for me.",
+            "Please scratch that itch.",
+            "Please delete that file today.",
+            "Please make that change today.",
+            "That is what I meant.",
+            "I mean it.",
+            "Actually, I think it is fine.",
+            "It's fine. Actually, let's go.",
+            "I'm sorry, I can't make it today.",
+            "It's expensive. I mean, we could still buy it but it is a lot of money."
+        ]
+        for text in untouched {
+            let outcome = SelfCorrection.repair(text)
+            #expect(outcome.text == text)
+            #expect(outcome.applied == 0)
+            #expect(outcome.unresolved == 0, "flagged: \(text)")
+        }
+    }
+
+    @Test func reportsWhatItIsNotSureAbout() {
+        let unsure = [
+            "The meeting is at noon. No wait, let's cancel it.",
+            "the red one, actually the blue one",
+            "it's blue, sorry, green",
+            "See you on Monday. I mean Tuesday.",
+            "send it on Monday no wait Tuesday"
+        ]
+        for text in unsure {
+            let outcome = SelfCorrection.repair(text)
+            #expect(outcome.text == text, "changed: \(text)")
+            #expect(outcome.unresolved >= 1, "not flagged: \(text)")
+            #expect(outcome.window != nil)
+        }
+    }
+
+    @Test func givesTheModelOnlyThePartItNeeds() {
+        let outcome = SelfCorrection.repair("We ship on Friday. Paint it red. The red one, actually the blue one, is better. Call me later.")
+        #expect(outcome.window == SelfCorrection.Window(
+            before: "We ship on Friday.",
+            middle: "Paint it red. The red one, actually the blue one, is better.",
+            after: "Call me later."
+        ))
+    }
+}
+
+@Suite("The fast path")
+struct FastPathTests {
+    private let vocabulary = Vocabulary(entries: [VocabularyEntry(word: "Stupidesigner", soundsLike: ["stupid designer"])])
+
+    @Test func mostDictationsNeedNoModel() {
+        let plan = CleanupPipeline.plan(prepared: "um so send it to stupid designer on Monday, no wait, Tuesday", vocabulary: vocabulary)
+        #expect(plan.window == nil)
+        #expect(plan.repairs == 1)
+        #expect(plan.ruleText.contains("Stupidesigner"))
+        #expect(plan.ruleText.contains("Tuesday"))
+        #expect(!plan.ruleText.contains("Monday"))
+        #expect(!plan.ruleText.lowercased().contains("no wait"))
+        #expect(!plan.ruleText.lowercased().contains("um "))
+        let piece = CleanupPipeline.finish(plan: plan, modelOutput: nil, vocabulary: vocabulary)
+        #expect(piece == CleanupPipeline.Piece(text: plan.ruleText, usedAI: false))
+    }
+
+    @Test func theModelOnlyRewritesItsWindow() {
+        let plan = CleanupPipeline.plan(prepared: "We ship on Friday. Paint it red. The red one, actually the blue one, is better. Call me later.", vocabulary: vocabulary)
+        #expect(plan.window != nil)
+        let good = CleanupPipeline.finish(plan: plan, modelOutput: "Paint it red. The blue one is better.", vocabulary: vocabulary)
+        #expect(good == CleanupPipeline.Piece(text: "We ship on Friday. Paint it red. The blue one is better. Call me later.", usedAI: true))
+
+        let silent = CleanupPipeline.finish(plan: plan, modelOutput: nil, vocabulary: vocabulary)
+        #expect(silent.usedAI == false)
+        #expect(silent.text == plan.ruleText)
+        #expect(silent.note == "model did not answer")
+
+        let wandering = CleanupPipeline.finish(plan: plan, modelOutput: "Sure! Here is a poem about paint and the colour blue for you.", vocabulary: vocabulary)
+        #expect(wandering.usedAI == false)
+        #expect(wandering.text == plan.ruleText)
+    }
+
+    @Test func oldHistoryFilesStillLoad() throws {
+        let old = """
+        [{"id":"7C0F0E0A-0000-4000-8000-000000000001","date":"2026-11-16T16:20:39Z","raw":"hello","cleaned":"Hello","usedAI":false,"seconds":2.5}]
+        """
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let entries = try decoder.decode([HistoryEntry].self, from: Data(old.utf8))
+        #expect(entries.count == 1)
+        #expect(entries[0].wait == nil)
+        #expect(HistoryEntry(raw: "a", cleaned: "A", usedAI: false, wait: 0.4).wait == 0.4)
+    }
+}
+

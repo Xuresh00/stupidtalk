@@ -82,6 +82,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let status = NSMenuItem(title: statusLine, action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
+        if let wait = state.lastWait {
+            let speed = NSMenuItem(title: "Last one: typed \(String(format: "%.1f", wait)) s after you let go", action: nil, keyEquivalent: "")
+            speed.isEnabled = false
+            menu.addItem(speed)
+        }
         menu.addItem(.separator())
 
         let cleanup = item("AI clean-up", #selector(toggleCleanup))
@@ -110,6 +115,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         menu.addItem(item("Word list", #selector(openWords)))
         menu.addItem(item("Settings", #selector(openSettings), key: ","))
         menu.addItem(item("Check setup", #selector(openSetup)))
+        menu.addItem(item("Copy speed report", #selector(copySpeedReport)))
         menu.addItem(.separator())
         menu.addItem(item("About StupidTalk", #selector(openAbout)))
         menu.addItem(item("Quit StupidTalk", #selector(quit), key: "q"))
@@ -175,6 +181,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func openSetup() {
         windows.showSetup()
+    }
+
+    @objc private func copySpeedReport() {
+        controller.copySpeedReport()
     }
 
     @objc private func openAbout() {

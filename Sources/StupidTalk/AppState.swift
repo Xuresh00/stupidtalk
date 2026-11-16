@@ -21,6 +21,21 @@ enum DictationPhase: Equatable {
     case cleaning
 }
 
+/// When the on-device model is asked to help.
+enum AIMode: String, CaseIterable {
+    /// Rules do the clean-up at once. The model only looks at a self-correction the rules are unsure about.
+    case smart
+    /// The model rewrites every dictation. More polish, more waiting.
+    case always
+
+    var title: String {
+        switch self {
+        case .smart: return "Only when I correct myself"
+        case .always: return "On every dictation"
+        }
+    }
+}
+
 enum SettingsTab: String, CaseIterable {
     case general = "General"
     case cleanup = "Clean-up"
@@ -35,6 +50,7 @@ final class AppState: ObservableObject {
     private enum Keys {
         static let hotkey = "hotkey"
         static let aiCleanup = "aiCleanupEnabled"
+        static let aiMode = "aiMode"
         static let microphone = "microphone"
         static let locale = "localeIdentifier"
         static let keepOnClipboard = "keepOnClipboard"
@@ -55,6 +71,9 @@ final class AppState: ObservableObject {
     }
     @Published var aiCleanupEnabled: Bool {
         didSet { defaults.set(aiCleanupEnabled, forKey: Keys.aiCleanup) }
+    }
+    @Published var aiMode: AIMode {
+        didSet { defaults.set(aiMode.rawValue, forKey: Keys.aiMode) }
     }
     @Published var microphone: MicrophoneChoice {
         didSet { defaults.set(microphone.rawValue, forKey: Keys.microphone) }
@@ -85,6 +104,8 @@ final class AppState: ObservableObject {
     @Published private(set) var entries: [HistoryEntry] = []
     @Published private(set) var lastEntry: HistoryEntry?
     @Published private(set) var totalWords: Int
+    /// Seconds between letting go of the key and the text being typed, for the latest dictation.
+    @Published private(set) var lastWait: Double?
 
     // What is going on right now.
     @Published var phase: DictationPhase = .idle
@@ -102,6 +123,7 @@ final class AppState: ObservableObject {
 
         hotkey = HotkeyChoice(rawValue: defaults.string(forKey: Keys.hotkey) ?? "") ?? .rightOption
         aiCleanupEnabled = defaults.object(forKey: Keys.aiCleanup) as? Bool ?? true
+        aiMode = AIMode(rawValue: defaults.string(forKey: Keys.aiMode) ?? "") ?? .smart
         microphone = MicrophoneChoice(rawValue: defaults.string(forKey: Keys.microphone) ?? "") ?? .builtIn
         localeIdentifier = defaults.string(forKey: Keys.locale) ?? AppState.defaultLocaleIdentifier()
         keepOnClipboard = defaults.object(forKey: Keys.keepOnClipboard) as? Bool ?? false
@@ -140,6 +162,7 @@ final class AppState: ObservableObject {
     /// pasted again, even when saving history is switched off.
     func record(_ entry: HistoryEntry) {
         lastEntry = entry
+        lastWait = entry.wait
         totalWords += Words.count(entry.cleaned)
         defaults.set(totalWords, forKey: Keys.totalWords)
         if saveHistory {

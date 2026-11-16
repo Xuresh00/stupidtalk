@@ -231,8 +231,20 @@ struct SettingsView: View {
         title("Clean-up", "Mr. Oops tidies what you said before he types it. It all happens on this Mac.")
 
         Card {
-            SettingRow("AI clean-up", detail: "Removes fillers, keeps only your corrected version when you change your mind, drops misspoken words, and fixes misheard words, spelling and punctuation.") {
+            SettingRow("AI clean-up", detail: "The on-device model helps when you correct yourself or stumble. Switch it off and only the instant, rule-based clean-up runs.") {
                 switchControl($state.aiCleanupEnabled)
+            }
+            Divide()
+            SettingRow("When to use the AI", detail: "Only when I correct myself: the text is typed at once, and the model only steps in for a correction the rules are not sure about. On every dictation: more polish, but you wait a few seconds each time.") {
+                Picker("", selection: $state.aiMode) {
+                    ForEach(AIMode.allCases, id: \.self) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 230)
+                .disabled(!state.aiCleanupEnabled)
             }
             Divide()
             HStack(alignment: .top, spacing: 10) {
@@ -256,9 +268,10 @@ struct SettingsView: View {
         }
 
         Card {
-            Text("How it stays honest")
+            Text("How it stays fast and honest")
                 .font(Brand.heading(14))
                 .foregroundStyle(Brand.cream)
+            bullet("Speed first. Clear corrections like \"on Monday, no wait, Tuesday\" are fixed by rule, with no waiting. The model gets a short time limit, and if it is too slow your words are typed without it.")
             bullet("It cleans. It never answers. Dictate a question and it stays a question.")
             bullet("Every answer is checked against what you said. If it added things, summarized, or wandered off, it is thrown away and your words are typed with the basic clean-up instead.")
             bullet("Your original words are always kept. Menu bar, then \"Copy what I actually said\".")
@@ -269,7 +282,7 @@ struct SettingsView: View {
             Text("Basic clean-up (always on)")
                 .font(Brand.heading(14))
                 .foregroundStyle(Brand.cream)
-            Text("Removes um and uh, fixes \"the the\", tidies punctuation and applies your word list. It runs when the AI clean-up is off or not available.")
+            Text("Removes um and uh, fixes \"the the\", applies clear self-corrections (\"no wait\", \"scratch that\"), tidies punctuation and applies your word list. It is instant and runs on every dictation.")
                 .font(Brand.text(13))
                 .foregroundStyle(Brand.muted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -392,6 +405,11 @@ struct SettingsView: View {
             Text("Mr. Oops has typed \(state.totalWords) words for you.")
                 .font(Brand.textMedium(15))
                 .foregroundStyle(Brand.cream)
+            if let wait = state.lastWait {
+                Text("Last one was typed \(String(format: "%.1f", wait)) seconds after you let go of the key.")
+                    .font(Brand.text(13))
+                    .foregroundStyle(Brand.amber)
+            }
             Text("Free and open source. Your voice and your words never leave this Mac: speech to text and the AI clean-up both run on the models that come with macOS.")
                 .font(Brand.text(13))
                 .foregroundStyle(Brand.muted)
@@ -405,9 +423,15 @@ struct SettingsView: View {
                     NSWorkspace.shared.open(AppInfo.repository)
                 }
                 .buttonStyle(QuietButtonStyle())
+            }
+            HStack(spacing: 10) {
                 Button("Open log folder") {
                     try? FileManager.default.createDirectory(at: AppInfo.logDirectory, withIntermediateDirectories: true)
                     NSWorkspace.shared.open(AppInfo.logDirectory)
+                }
+                .buttonStyle(QuietButtonStyle())
+                Button("Copy speed report") {
+                    controller.copySpeedReport()
                 }
                 .buttonStyle(QuietButtonStyle())
             }
@@ -505,6 +529,9 @@ struct HistoryRow: View {
                 Text(HistoryRow.dateFormat.string(from: entry.date))
                 if let app = entry.appName, !app.isEmpty {
                     Text("in \(app)")
+                }
+                if let wait = entry.wait {
+                    Text("typed in \(String(format: "%.1f", wait)) s")
                 }
                 Spacer()
                 Text(entry.usedAI ? "AI clean-up" : "Basic clean-up")

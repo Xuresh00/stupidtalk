@@ -1,8 +1,14 @@
 #!/bin/bash
 # Builds StupidTalk.app from source.
 #
-#   scripts/build.sh              -> dist/StupidTalk.app and dist/StupidTalk-<version>.zip
-#   scripts/build.sh ~/Applications   -> puts the app straight into that folder
+#   scripts/build.sh                 -> dist/StupidTalk.app and dist/StupidTalk-<version>.zip
+#   scripts/build.sh /Applications   -> puts the app straight into that folder
+#
+# Options, as environment variables:
+#   STUPIDTALK_DMG_DIR=folder    also make StupidTalk-<version>.dmg there, the file to share
+#   STUPIDTALK_SKIP_ZIP=1        no zip
+#   STUPIDTALK_BUILD_DIR=folder  where the build cache lives (default: .build-local in the project)
+#   STUPIDTALK_BUILD_NUMBER=n    the build number shown in About
 #
 # Needs macOS 26 or newer on Apple silicon, and Swift 6 (Xcode, or only the
 # Command Line Tools: xcode-select --install).
@@ -50,5 +56,27 @@ if [ "${STUPIDTALK_SKIP_ZIP:-0}" != 1 ]; then
     rm -f "$ZIP"
     ditto -c -k --keepParent "$APP" "$ZIP"
     echo "== Zip: $ZIP"
+fi
+# A disk image with the app and a shortcut to Applications: the usual way to hand over a Mac app.
+if [ -n "${STUPIDTALK_DMG_DIR:-}" ]; then
+    mkdir -p "$STUPIDTALK_DMG_DIR"
+    DMG_DIR="$(cd "$STUPIDTALK_DMG_DIR" && pwd)"
+    DMG="$DMG_DIR/$APP_NAME-$VERSION.dmg"
+    DMG_STAGE="$BUILD_ROOT/dmg"
+    rm -rf "$DMG_STAGE"
+    mkdir -p "$DMG_STAGE"
+    ditto "$APP" "$DMG_STAGE/$APP_NAME.app"
+    ln -s /Applications "$DMG_STAGE/Applications"
+    # The new app file replaces older ones in that folder.
+    rm -f "$DMG_DIR/$APP_NAME"-[0-9]*.dmg "$DMG_DIR/$APP_NAME"-[0-9]*.zip
+    if hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DMG" >/dev/null; then
+        echo "== Disk image: $DMG"
+    else
+        echo "== The disk image could not be made. Saving the app as a zip instead."
+        rm -f "$DMG"
+        ditto -c -k --keepParent "$APP" "$DMG_DIR/$APP_NAME-$VERSION.zip"
+        echo "== Zip: $DMG_DIR/$APP_NAME-$VERSION.zip"
+    fi
+    rm -rf "$DMG_STAGE"
 fi
 echo "== Done: $OUTPUT_DIR/$APP_NAME.app"
