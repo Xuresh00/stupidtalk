@@ -67,8 +67,14 @@ if [ -n "${STUPIDTALK_DMG_DIR:-}" ]; then
     mkdir -p "$DMG_STAGE"
     ditto "$APP" "$DMG_STAGE/$APP_NAME.app"
     ln -s /Applications "$DMG_STAGE/Applications"
-    # The new app file replaces older ones in that folder.
-    rm -f "$DMG_DIR/$APP_NAME"-[0-9]*.dmg "$DMG_DIR/$APP_NAME"-[0-9]*.zip
+    # The new app file replaces older ones in that folder. The zip of this build stays when one was made.
+    for old in "$DMG_DIR/$APP_NAME"-[0-9]*.dmg "$DMG_DIR/$APP_NAME"-[0-9]*.zip; do
+        [ -e "$old" ] || continue
+        if [ "$old" = "$DMG_DIR/$APP_NAME-$VERSION.zip" ] && [ "${STUPIDTALK_SKIP_ZIP:-0}" != 1 ]; then
+            continue
+        fi
+        rm -f "$old"
+    done
     if hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DMG" >/dev/null; then
         echo "== Disk image: $DMG"
     else
