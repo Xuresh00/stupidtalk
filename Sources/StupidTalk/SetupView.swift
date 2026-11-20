@@ -21,7 +21,6 @@ struct SetupView: View {
                 microphoneStep
                 accessibilityStep
                 speechStep
-                cleanupStep
                 tryIt
                 footer
             }
@@ -43,7 +42,7 @@ struct SetupView: View {
                 Text(state.everythingReady ? "You're set" : "Let's get you talking")
                     .font(Brand.display(24))
                     .foregroundStyle(Brand.cream)
-                Text("Hold \(state.hotkey.shortTitle), talk, let go. Mr. Oops types it where your cursor is. Four quick checks first.")
+                Text("Hold \(state.hotkey.shortTitle), talk, let go. Mr. Oops types it where your cursor is. Three quick checks first.")
                     .font(Brand.text(13))
                     .foregroundStyle(Brand.muted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -73,7 +72,7 @@ struct SetupView: View {
         Step(
             number: 2,
             title: "Accessibility",
-            detail: "Lets StupidTalk notice the hold-to-talk key in any app and paste the text at your cursor. Switch StupidTalk on in the list, then come back. This turns green by itself.",
+            detail: "Lets StupidTalk notice the hold-to-talk key in any app and type the words at your cursor. Switch StupidTalk on in the list, then come back. This turns green by itself.",
             status: state.accessibilityGranted ? .ready : .needsYou
         ) {
             if !state.accessibilityGranted {
@@ -94,18 +93,27 @@ struct SetupView: View {
         ) {
             switch state.speechStatus {
             case .needsDownload:
-                Button("Download the speech model") {
-                    controller.installSpeechModel()
+                Button("Download \(state.speechModel.title) (\(state.speechModel.sizeText))") {
+                    controller.downloadSpeechModel()
                 }
                 .buttonStyle(PrimaryButtonStyle())
             case .downloading(let fraction):
-                ProgressView(value: min(1, max(0, fraction)))
-                    .frame(width: 260)
-            case .unavailable, .unknown:
-                Button("Check again") {
-                    controller.languageChanged()
+                HStack(spacing: 12) {
+                    ProgressView(value: min(1, max(0, fraction)))
+                        .frame(width: 240)
+                    Text("\(Int((fraction * 100).rounded(.down)))%")
+                        .font(Brand.textMedium(12))
+                        .foregroundStyle(Brand.muted)
+                        .monospacedDigit()
+                }
+            case .unavailable:
+                Button("Download again") {
+                    controller.redownloadSpeechModel()
                 }
                 .buttonStyle(QuietButtonStyle())
+            case .unknown, .loading:
+                ProgressView()
+                    .controlSize(.small)
             case .ready:
                 EmptyView()
             }
@@ -113,45 +121,28 @@ struct SetupView: View {
     }
 
     private var speechDetail: String {
+        let model = state.speechModel
         switch state.speechStatus {
-        case .ready: return "Apple's on-device speech model is installed. Your voice stays on this Mac."
-        case .needsDownload: return "Apple's on-device speech model needs a one-time download. After that it works offline."
-        case .downloading: return "Downloading. You can keep this window open."
-        case .unavailable(let reason): return reason
-        case .unknown: return "Checking the speech model."
+        case .ready:
+            return "\(model.title) is ready. It runs on this Mac's GPU, and your voice never leaves the Mac."
+        case .needsDownload:
+            return "A one-time download of \(model.title), the speech-to-text model (\(model.sizeText)). After that it works offline."
+        case .downloading:
+            return "Downloading \(model.title). You can keep using your Mac meanwhile."
+        case .loading:
+            return "Loading \(model.title). A few seconds."
+        case .unavailable(let reason):
+            return reason
+        case .unknown:
+            return "Checking the speech model."
         }
     }
 
     private var speechStepStatus: StepStatus {
         switch state.speechStatus {
         case .ready: return .ready
-        case .downloading, .unknown: return .working
+        case .downloading, .unknown, .loading: return .working
         case .needsDownload, .unavailable: return .needsYou
-        }
-    }
-
-    private var cleanupStep: some View {
-        Step(
-            number: 4,
-            title: "AI clean-up (optional, but it's the good part)",
-            detail: cleanupDetail,
-            status: state.aiStatus.isReady ? .ready : .optional
-        ) {
-            if !state.aiStatus.isReady {
-                Button("Open Apple Intelligence settings") {
-                    Permissions.open(.appleIntelligence)
-                }
-                .buttonStyle(QuietButtonStyle())
-            }
-        }
-    }
-
-    private var cleanupDetail: String {
-        switch state.aiStatus {
-        case .ready:
-            return "The on-device model is ready. Fillers, self-corrections and misheard words get fixed before the text is typed."
-        case .off(let reason):
-            return reason + " Without it you still get the basic clean-up."
         }
     }
 
@@ -195,7 +186,6 @@ enum StepStatus: Equatable {
     case ready
     case needsYou
     case working
-    case optional
 }
 
 /// One numbered line of the checklist.
@@ -250,7 +240,6 @@ struct Step<Action: View>: View {
         case .ready: return "Ready"
         case .needsYou: return "Needs you"
         case .working: return "Working"
-        case .optional: return "Optional"
         }
     }
 
@@ -259,7 +248,6 @@ struct Step<Action: View>: View {
         case .ready: return Brand.green
         case .needsYou: return Brand.amber
         case .working: return Brand.muted
-        case .optional: return Brand.muted
         }
     }
 }

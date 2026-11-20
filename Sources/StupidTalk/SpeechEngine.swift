@@ -1,201 +1,111 @@
-import AVFoundation
-import Speech
+import Foundation
+import TranscribeCpp
 
-enum SpeechModelStatus: Equatable {
-    case unknown
-    case unavailable(String)
-    case needsDownload
-    case downloading(Double)
-    case ready
-}
+/// Speech to text on this Mac, with transcribe.cpp: the open-source engine the Handy app
+/// runs on. The model works on the GPU (Metal), and the audio never leaves the Mac.
+///
+/// Everything happens on one private queue, one dictation at a time: the engine allows a
+/// single run per model, and a session must not be shared between threads.
+final class SpeechEngine: @unchecked Sendable {
+    enum EngineError: LocalizedError {
+        case notLoaded
 
-enum SpeechEngineError: LocalizedError {
-    case unavailable
-    case languageNotSupported
-    case noAudioFormat
-    case conversionFailed
-
-    var errorDescription: String? {
-        switch self {
-        case .unavailable: return "On-device speech recognition isn't available on this Mac."
-        case .languageNotSupported: return "That language isn't supported on this Mac."
-        case .noAudioFormat: return "The speech model isn't ready yet."
-        case .conversionFailed: return "The microphone audio couldn't be read."
+        var errorDescription: String? {
+            "The speech model isn't loaded yet."
         }
     }
-}
 
-/// Turns microphone buffers into the audio format the speech model wants.
-final class BufferConverter {
-    private var converter: AVAudioConverter?
+    struct Heard {
+        let text: String
+        /// How long the model took, in milliseconds.
+        let milliseconds: Int
+    }
 
-    func convert(_ buffer: AVAudioPCMBuffer, to format: AVAudioFormat) throws -> AVAudioPCMBuffer {
-        let source = buffer.format
-        if source == format { return buffer }
-        if converter == nil || converter?.inputFormat != source || converter?.outputFormat != format {
-            converter = AVAudioConverter(from: source, to: format)
-            // No priming, so the first words are not swallowed.
-            converter?.primeMethod = .none
-        }
-        guard let converter else { throw SpeechEngineError.conversionFailed }
+    private let queue = DispatchQueue(label: "com.stupidesigner.stupidtalk.speech", qos: .userInitiated)
+    private var model: Model?
+    private var session: TranscribeCpp.Session?
+    private var loadedPath: String?
+    private var takesVocabulary = false
 
-        let ratio = format.sampleRate / source.sampleRate
-        let capacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up)) + 32
-        guard let output = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
-            throw SpeechEngineError.conversionFailed
-        }
-
-        var conversionError: NSError?
-        var supplied = false
-        let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
-            if supplied {
-                inputStatus.pointee = .noDataNow
-                return nil
+    /// Loads the model file onto the GPU, then runs a short warm-up so the first dictation
+    /// is as quick as the rest. Returns the name of the backend in use, for the log.
+    func load(_ url: URL) async throws -> String {
+        try await onQueue {
+            if self.loadedPath == url.path, let model = self.model, self.session != nil {
+                return model.backend
             }
-            supplied = true
-            inputStatus.pointee = .haveData
-            return buffer
+            self.session = nil
+            self.model = nil
+            self.loadedPath = nil
+            try Transcribe.initBackends()
+            let model = try Model(path: url.path)
+            let session = try model.session()
+            // Half a second of silence compiles the GPU code now, not during your first dictation.
+            _ = try? session.run([Float](repeating: 0, count: 8_000), options: RunOptions(language: "en"))
+            self.model = model
+            self.session = session
+            self.loadedPath = url.path
+            self.takesVocabulary = model.supports(.vocabulary)
+            return model.backend
         }
-        if status == .error {
-            throw conversionError ?? SpeechEngineError.conversionFailed
+    }
+
+    /// Frees the model's memory. Used when you switch models.
+    func unload() {
+        queue.async {
+            self.session = nil
+            self.model = nil
+            self.loadedPath = nil
+            self.takesVocabulary = false
         }
-        return output
-    }
-}
-
-/// Speech to text with Apple's on-device model (the Speech framework's SpeechAnalyzer).
-/// Audio never leaves the Mac.
-final class SpeechEngine {
-    private let lock = NSLock()
-    private var storedFormat: AVAudioFormat?
-
-    /// The audio format the model wants. Known after `prepare` has run once.
-    var analyzerFormat: AVAudioFormat? {
-        lock.lock()
-        defer { lock.unlock() }
-        return storedFormat
     }
 
-    private func remember(_ format: AVAudioFormat?) {
-        lock.lock()
-        storedFormat = format
-        lock.unlock()
-    }
-
-    /// English variants the on-device model supports, for example "en_IN" or "en_US".
-    static func englishLocaleIdentifiers() async -> [String] {
-        guard SpeechTranscriber.isAvailable else { return [] }
-        let locales = await SpeechTranscriber.supportedLocales
-        let english = locales.filter { $0.language.languageCode?.identifier == "en" }
-        return english.map { $0.identifier }.sorted()
-    }
-
-    private func transcriberLocale(for identifier: String) async throws -> Locale {
-        guard SpeechTranscriber.isAvailable else { throw SpeechEngineError.unavailable }
-        if let match = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: identifier)) {
-            return match
+    /// `samples`: mono, 16 kHz, between -1 and 1.
+    /// `vocabulary`: your word list. Models that can use one (Whisper) get it as a hint.
+    func transcribe(_ samples: [Float], vocabulary: [String]) async throws -> Heard {
+        try await onQueue {
+            guard let session = self.session else { throw EngineError.notLoaded }
+            var options = RunOptions(language: "en")
+            if self.takesVocabulary, !vocabulary.isEmpty {
+                options.vocabulary = Array(vocabulary.prefix(40))
+            }
+            let started = Date()
+            let transcript = try session.run(samples, options: options)
+            let milliseconds = Int(Date().timeIntervalSince(started) * 1000)
+            let text = transcript.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return Heard(text: text, milliseconds: milliseconds)
         }
-        if let fallback = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "en_US")) {
-            return fallback
-        }
-        throw SpeechEngineError.languageNotSupported
     }
 
-    func status(localeIdentifier: String) async -> SpeechModelStatus {
-        do {
-            let locale = try await transcriberLocale(for: localeIdentifier)
-            let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
-            var status = await AssetInventory.status(forModules: [transcriber])
-            if status == .supported, await isOnDisk(locale) {
-                // The model is already on this Mac (another app or macOS fetched it). It only
-                // has to be reserved for StupidTalk, which is quick and downloads nothing.
-                if let request = try? await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-                    try? await request.downloadAndInstall()
+    private func onQueue<T>(_ work: @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do {
+                    continuation.resume(returning: try work())
+                } catch {
+                    continuation.resume(throwing: error)
                 }
-                status = await AssetInventory.status(forModules: [transcriber])
             }
-            switch status {
-            case .installed: return .ready
-            case .downloading: return .downloading(0)
-            case .supported: return .needsDownload
-            case .unsupported: return .unavailable("This language isn't supported on this Mac.")
-            @unknown default: return .unknown
-            }
-        } catch {
-            return .unavailable(error.localizedDescription)
         }
     }
+}
 
-    private func isOnDisk(_ locale: Locale) async -> Bool {
-        let wanted = locale.identifier(.bcp47)
-        let installed = await SpeechTranscriber.installedLocales
-        return installed.contains { $0.identifier(.bcp47) == wanted }
-    }
-
-    /// Downloads the speech model through macOS. `progress` gets values from 0 to 1.
-    func install(localeIdentifier: String, progress: @escaping @Sendable (Double) -> Void) async throws {
-        let locale = try await transcriberLocale(for: localeIdentifier)
-        let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
-        guard let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) else {
-            return
+extension SpeechEngine {
+    /// What went wrong, in plain words, for the pill and the setup window.
+    static func plainMessage(for error: Error) -> String {
+        if let engine = error as? EngineError, let text = engine.errorDescription { return text }
+        guard let engineError = error as? TranscribeError else {
+            return "Something went wrong. Try again."
         }
-        let observation = request.progress.observe(\.fractionCompleted, options: [.initial, .new]) { item, _ in
-            progress(item.fractionCompleted)
+        switch engineError {
+        case .modelFileNotFound, .modelLoad, .versionMismatch, .badStructSize:
+            return "The speech model didn't load. Download it again in Settings."
+        case .outOfMemory:
+            return "Not enough free memory for the speech model. Close a big app and try again."
+        case .inputTooShort:
+            return "That was too short to hear."
+        default:
+            return "The speech model had a problem. Try again."
         }
-        defer { observation.invalidate() }
-        try await request.downloadAndInstall()
-    }
-
-    /// Loads the model and learns its audio format, so a dictation can start without a pause.
-    func prepare(localeIdentifier: String) async throws {
-        let locale = try await transcriberLocale(for: localeIdentifier)
-        let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
-        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
-            throw SpeechEngineError.noAudioFormat
-        }
-        remember(format)
-        let options = SpeechAnalyzer.Options(priority: .utility, modelRetention: .processLifetime)
-        let analyzer = SpeechAnalyzer(modules: [transcriber], options: options)
-        try await analyzer.prepareToAnalyze(in: format)
-    }
-
-    /// Transcribes everything that arrives on `stream` and returns when the stream has finished.
-    /// `vocabulary` nudges the recognizer toward your own words.
-    func transcribe(stream: AsyncStream<AnalyzerInput>, localeIdentifier: String, vocabulary: [String]) async throws -> String {
-        let locale = try await transcriberLocale(for: localeIdentifier)
-        let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
-        let options = SpeechAnalyzer.Options(priority: .userInitiated, modelRetention: .processLifetime)
-        let analyzer = SpeechAnalyzer(modules: [transcriber], options: options)
-
-        if !vocabulary.isEmpty {
-            let context = AnalysisContext()
-            context.contextualStrings[.general] = vocabulary
-            do {
-                try await analyzer.setContext(context)
-            } catch {
-                Log.info("Word list hint was not accepted by the speech model: \(error.localizedDescription)")
-            }
-        }
-
-        let collector = Task { () throws -> String in
-            var text = ""
-            for try await result in transcriber.results where result.isFinal {
-                text += String(result.text.characters)
-            }
-            return text
-        }
-
-        do {
-            if let lastSample = try await analyzer.analyzeSequence(stream) {
-                try await analyzer.finalizeAndFinish(through: lastSample)
-            } else {
-                await analyzer.cancelAndFinishNow()
-            }
-        } catch {
-            collector.cancel()
-            await analyzer.cancelAndFinishNow()
-            throw error
-        }
-        return try await collector.value
     }
 }

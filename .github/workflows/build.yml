@@ -33,6 +33,24 @@ jobs:
           STUPIDTALK_BUILD_NUMBER: ${{ github.run_number }}
           STUPIDTALK_DMG_DIR: dist
 
+      - name: Check the app starts
+        run: |
+          APP_BIN=dist/StupidTalk.app/Contents/MacOS/StupidTalk
+          otool -L "$APP_BIN" | grep CTranscribe
+          otool -l "$APP_BIN" | grep -A2 LC_RPATH
+          test -f dist/StupidTalk.app/Contents/Frameworks/CTranscribe.framework/Versions/Current/CTranscribe
+          "$APP_BIN" &
+          APP_PID=$!
+          sleep 10
+          if kill -0 "$APP_PID" 2>/dev/null; then
+            echo "StupidTalk is running"
+            kill "$APP_PID"
+          else
+            wait "$APP_PID" || true
+            echo "StupidTalk quit right after starting" >&2
+            exit 1
+          fi
+
       - name: Upload the app
         uses: actions/upload-artifact@v4
         with:

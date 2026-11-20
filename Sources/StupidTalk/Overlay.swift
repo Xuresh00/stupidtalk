@@ -10,7 +10,17 @@ enum OverlayState: Equatable {
     /// The AI clean-up is running. The text is a short progress label.
     case cleaning(String)
     case done
+    /// The words are in. A Copy button shows for a moment, for when you want them on the clipboard too.
+    /// `note` replaces "Done" when there is something to say.
+    case typed(text: String, note: String?)
+    case copied
     case message(String, OopsPose)
+
+    /// Only the Copy moment takes clicks. The rest of the time clicks go straight through.
+    var takesClicks: Bool {
+        if case .typed = self { return true }
+        return false
+    }
 }
 
 /// How many level bars the pill shows.
@@ -20,6 +30,9 @@ private let levelBarCount = 18
 final class OverlayModel: ObservableObject {
     @Published var state: OverlayState = .hidden
     @Published var levels: [CGFloat] = Array(repeating: 0, count: levelBarCount)
+    /// True while the pointer is on the pill, so the Copy button doesn't vanish under it.
+    @Published var hovering = false
+    var onCopy: ((String) -> Void)?
 
     func push(_ level: Float) {
         var next = levels
@@ -46,13 +59,38 @@ final class OverlayController {
         model = OverlayModel()
     }
 
+    /// Called with the text when you click Copy.
+    var copyHandler: ((String) -> Void)?
+
     func show(_ state: OverlayState) {
         generation += 1
         if state == .listening { model.resetLevels() }
+        if !state.takesClicks { model.hovering = false }
         model.state = state
         makePanelIfNeeded()
+        panel?.ignoresMouseEvents = !state.takesClicks
         position()
         panel?.orderFrontRegardless()
+    }
+
+    /// Shows "Done" with a Copy button for `seconds`, longer while the pointer is on it.
+    func offerCopy(_ text: String, note: String? = nil, seconds: Double = 2) {
+        show(.typed(text: text, note: note))
+        let shown = generation
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            // Don't pull the button away from under the pointer.
+            while let self, self.generation == shown, self.model.hovering {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            guard let self, self.generation == shown else { return }
+            self.hide()
+        }
+    }
+
+    private func copyTapped(_ text: String) {
+        copyHandler?(text)
+        flash(.copied, seconds: 0.9)
     }
 
     /// Shows a state for a moment, then hides the pill.
@@ -69,12 +107,15 @@ final class OverlayController {
     func hide() {
         generation += 1
         model.state = .hidden
+        model.hovering = false
+        panel?.ignoresMouseEvents = true
         panel?.orderOut(nil)
     }
 
     private func makePanelIfNeeded() {
         guard panel == nil else { return }
-        let panel = NSPanel(
+        model.onCopy = { [weak self] text in self?.copyTapped(text) }
+        let panel = OverlayPanel(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -89,7 +130,7 @@ final class OverlayController {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
-        let host = NSHostingView(rootView: OverlayView(model: model))
+        let host = FirstClickHostingView(rootView: OverlayView(model: model))
         host.frame = NSRect(origin: .zero, size: size)
         panel.contentView = host
         self.panel = panel
@@ -106,6 +147,17 @@ final class OverlayController {
             display: true
         )
     }
+}
+
+/// A panel that never takes keyboard focus. Clicking it leaves your app in front.
+final class OverlayPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+/// Takes the very first click, so one click on Copy is enough even though the pill is never focused.
+final class FirstClickHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 struct OverlayView: View {
@@ -125,6 +177,8 @@ struct OverlayView: View {
                 .background(Brand.surface, in: Capsule())
                 .overlay(Capsule().stroke(Brand.line, lineWidth: 1))
                 .shadow(color: Color.black.opacity(0.4), radius: 12, x: 0, y: 6)
+                .contentShape(Capsule())
+                .onHover { model.hovering = $0 }
                 .transition(.opacity)
             }
         }
@@ -138,7 +192,7 @@ struct OverlayView: View {
         case .listening: return .point
         case .thinking: return .laptop
         case .cleaning: return .pencil
-        case .done: return .done
+        case .done, .typed, .copied: return .done
         case .message(_, let pose): return pose
         }
     }
@@ -156,19 +210,53 @@ struct OverlayView: View {
             label(progress)
         case .done:
             label("Done")
+        case .typed(let text, let note):
+            HStack(spacing: 12) {
+                if let note {
+                    label(note, maxWidth: 190)
+                } else {
+                    Text("Done")
+                        .font(Brand.textMedium(14))
+                        .foregroundStyle(Brand.cream)
+                        .fixedSize()
+                }
+                Button {
+                    model.onCopy?(text)
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(PillCopyButtonStyle())
+                .help("Put this text on the clipboard too")
+            }
+        case .copied:
+            label("Copied")
         case .message(let text, _):
             label(text)
         }
     }
 
-    private func label(_ text: String) -> some View {
+    private func label(_ text: String, maxWidth: CGFloat = 250) -> some View {
         Text(text)
             .font(Brand.textMedium(14))
             .foregroundStyle(Brand.cream)
             .lineLimit(2)
             .multilineTextAlignment(.leading)
             .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: 250, alignment: .leading)
+            .frame(maxWidth: maxWidth, alignment: .leading)
+    }
+}
+
+/// The small amber Copy button in the pill.
+struct PillCopyButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(Brand.textBold(13))
+            .foregroundStyle(Brand.ink)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(configuration.isPressed ? Brand.amberBright : Brand.amber, in: Capsule())
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
     }
 }
 

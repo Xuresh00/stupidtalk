@@ -168,3 +168,63 @@ enum AudioDevices {
         return channels
     }
 }
+
+/// Turns microphone audio into what the speech model wants: mono, 16 kHz, 32-bit float.
+/// Used from the audio thread only, one per dictation.
+final class Resampler {
+    static let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
+
+    private var converter: AVAudioConverter?
+
+    func convert(_ buffer: AVAudioPCMBuffer) -> [Float] {
+        let target = Self.format
+        if converter == nil || converter?.inputFormat != buffer.format {
+            converter = AVAudioConverter(from: buffer.format, to: target)
+            // No priming: priming swallows the first few milliseconds, and with them a first word.
+            converter?.primeMethod = .none
+            converter?.downmix = true
+        }
+        guard let converter, buffer.frameLength > 0 else { return [] }
+
+        let ratio = target.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up)) + 64
+        guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return [] }
+
+        var supplied = false
+        var error: NSError?
+        let status = converter.convert(to: output, error: &error) { _, inputStatus in
+            if supplied {
+                inputStatus.pointee = .noDataNow
+                return nil
+            }
+            supplied = true
+            inputStatus.pointee = .haveData
+            return buffer
+        }
+        guard status != .error, let channel = output.floatChannelData?[0] else { return [] }
+        return Array(UnsafeBufferPointer(start: channel, count: Int(output.frameLength)))
+    }
+}
+
+/// Collects the 16 kHz samples of one dictation. Written from the audio thread, read once at the end.
+final class SampleCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var samples: [Float] = []
+
+    init() {
+        samples.reserveCapacity(16_000 * 30)
+    }
+
+    func append(_ more: [Float]) {
+        guard !more.isEmpty else { return }
+        lock.lock()
+        samples.append(contentsOf: more)
+        lock.unlock()
+    }
+
+    func snapshot() -> [Float] {
+        lock.lock()
+        defer { lock.unlock() }
+        return samples
+    }
+}

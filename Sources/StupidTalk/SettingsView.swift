@@ -171,20 +171,24 @@ struct SettingsView: View {
                 .pickerStyle(.menu)
                 .frame(width: 210)
             }
-            Divide()
-            SettingRow("English accent", detail: "Pick the English you speak. It helps the speech model hear you right.") {
-                Picker("", selection: $state.localeIdentifier) {
-                    ForEach(localeChoices, id: \.self) { identifier in
-                        Text(localeName(identifier)).tag(identifier)
+        }
+
+        Card {
+            SettingRow("Speech model", detail: state.speechModel.detail) {
+                Picker("", selection: $state.speechModel) {
+                    ForEach(SpeechModelChoice.allCases) { choice in
+                        Text(choice.menuTitle).tag(choice)
                     }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .frame(width: 210)
+                .frame(width: 290)
             }
+            Divide()
+            speechModelStatusRow
         }
-        .onChange(of: state.localeIdentifier) { _, _ in
-            controller.languageChanged()
+        .onChange(of: state.speechModel) { _, _ in
+            controller.speechModelChanged()
         }
 
         Card {
@@ -192,8 +196,15 @@ struct SettingsView: View {
                 switchControl($state.addTrailingSpace)
             }
             Divide()
-            SettingRow("Keep the text on the clipboard", detail: "Off: your old clipboard comes back after the paste.") {
-                switchControl($state.keepOnClipboard)
+            SettingRow("How the words go in", detail: "Type it: Mr. Oops types your words like a keyboard, so whatever you copied stays on your clipboard. After each dictation a Copy button shows for 2 seconds if you want the words on the clipboard too.") {
+                Picker("", selection: $state.insertMethod) {
+                    ForEach(InsertMethod.allCases, id: \.self) { method in
+                        Text(method.title).tag(method)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 270)
             }
             Divide()
             SettingRow("Play sounds", detail: "A small sound when listening starts and when the text is typed.") {
@@ -212,30 +223,69 @@ struct SettingsView: View {
         }
     }
 
-    private var localeChoices: [String] {
-        var choices = state.availableLocales
-        if !choices.contains(state.localeIdentifier) {
-            choices.insert(state.localeIdentifier, at: 0)
+    /// Where the chosen model is at, with the button that moves it along.
+    @ViewBuilder
+    private var speechModelStatusRow: some View {
+        let model = state.speechModel
+        HStack(alignment: .center, spacing: 10) {
+            Circle()
+                .fill(state.speechStatus == .ready ? Brand.green : Brand.amber)
+                .frame(width: 9, height: 9)
+            switch state.speechStatus {
+            case .ready:
+                statusText("\(model.title) is ready on this Mac's GPU. Your voice never leaves the Mac.")
+            case .needsDownload:
+                statusText("Not downloaded yet. A one-time download of \(model.sizeText).")
+                Spacer(minLength: 8)
+                Button("Download") { controller.downloadSpeechModel() }
+                    .buttonStyle(PrimaryButtonStyle())
+            case .downloading(let fraction):
+                statusText("Downloading \(model.title): \(Int((fraction * 100).rounded(.down)))%")
+                Spacer(minLength: 8)
+                ProgressView(value: min(1, max(0, fraction)))
+                    .frame(width: 160)
+            case .loading:
+                statusText("Loading \(model.title).")
+            case .unavailable(let reason):
+                statusText(reason)
+                Spacer(minLength: 8)
+                Button("Download again") { controller.redownloadSpeechModel() }
+                    .buttonStyle(QuietButtonStyle())
+            case .unknown:
+                statusText("Checking the speech model.")
+            }
         }
-        return choices
     }
 
-    private func localeName(_ identifier: String) -> String {
-        Locale.current.localizedString(forIdentifier: identifier) ?? identifier
+    private func statusText(_ text: String) -> some View {
+        Text(text)
+            .font(Brand.text(13))
+            .foregroundStyle(Brand.cream)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     // MARK: Clean-up
 
     @ViewBuilder
     private var cleanupPage: some View {
-        title("Clean-up", "Mr. Oops tidies what you said before he types it. It all happens on this Mac.")
+        title("Clean-up", "Mr. Oops types what you said, with the um and uh taken out. It all happens on this Mac.")
 
         Card {
-            SettingRow("AI clean-up", detail: "The on-device model makes lists, adds brackets, fixes small grammar mistakes and punctuation. Switch it off and only the instant, rule-based clean-up runs.") {
+            Text("Basic clean-up (always on)")
+                .font(Brand.heading(14))
+                .foregroundStyle(Brand.cream)
+            Text("Removes um and uh, fixes \"the the\", applies clear self-corrections (\"no wait\", \"scratch that\"), spoken commands (\"new line\", \"comma\") and your word list. It never adds commas, brackets or lists of its own. Instant, on every dictation.")
+                .font(Brand.text(13))
+                .foregroundStyle(Brand.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        Card {
+            SettingRow("AI polish", detail: "Off by default. When it's on, the on-device model from macOS also fixes small grammar mistakes. It only adds a list or brackets when you ask for one out loud.") {
                 switchControl($state.aiCleanupEnabled)
             }
             Divide()
-            SettingRow("When to use the AI", detail: "On every dictation: lists, brackets and grammar get fixed. It usually takes well under a second, and never more than about 2 for a sentence or two. Only when I correct myself: the fastest, with rules doing almost everything.") {
+            SettingRow("When to use the AI", detail: "Only when I correct myself: the fastest, rules do almost everything. On every dictation: grammar gets a look each time. Usually well under a second, never more than about 2 for a sentence or two.") {
                 Picker("", selection: $state.aiMode) {
                     ForEach(AIMode.allCases, id: \.self) { mode in
                         Text(mode.title).tag(mode)
@@ -271,7 +321,7 @@ struct SettingsView: View {
             Text("How it stays fast and honest")
                 .font(Brand.heading(14))
                 .foregroundStyle(Brand.cream)
-            bullet("Speed first. The model gets a short time limit. If it is too slow, your words are typed with the rule-based clean-up instead.")
+            bullet("Speed first. The AI gets a short time limit. If it is too slow, your words are typed with the basic clean-up instead.")
             bullet("Say \"new line\", \"new paragraph\", \"bullet point\", \"open bracket\" and \"close bracket\", \"comma\", \"full stop\" or \"question mark\" and they are done for you.")
             bullet("It cleans. It never answers. Dictate a question and it stays a question.")
             bullet("Every answer is checked against what you said. If it added things, summarized, or wandered off, it is thrown away and your words are typed with the basic clean-up instead.")
@@ -279,15 +329,6 @@ struct SettingsView: View {
             bullet("Short bits like \"yes\" or \"sounds good\" skip the AI, so they appear instantly.")
         }
 
-        Card {
-            Text("Basic clean-up (always on)")
-                .font(Brand.heading(14))
-                .foregroundStyle(Brand.cream)
-            Text("Removes um and uh, fixes \"the the\", applies clear self-corrections (\"no wait\", \"scratch that\") and spoken commands (\"new line\", \"open bracket\"), tidies punctuation and applies your word list. It is instant and runs on every dictation.")
-                .font(Brand.text(13))
-                .foregroundStyle(Brand.muted)
-                .fixedSize(horizontal: false, vertical: true)
-        }
     }
 
     private var aiStatusText: String {
@@ -316,7 +357,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var wordsPage: some View {
-        title("Word list", "Names and words the speech model keeps getting wrong. Add the right spelling, and what it tends to hear instead.")
+        title("Word list", "Names and words the speech model keeps getting wrong. Add the right spelling, and what it tends to hear instead. Near misses get fixed too, so \"stupid dark\" still comes out as StupidTalk.")
 
         Card {
             HStack(spacing: 10) {
@@ -411,9 +452,13 @@ struct SettingsView: View {
                     .font(Brand.text(13))
                     .foregroundStyle(Brand.amber)
             }
-            Text("Free and open source. Your voice and your words never leave this Mac: speech to text and the AI clean-up both run on the models that come with macOS.")
+            Text("Free and open source. Your voice and your words never leave this Mac. Speech to text runs on transcribe.cpp, the open-source engine behind the Handy app, with \(state.speechModel.title) on your GPU. The optional AI polish uses the model that comes with macOS.")
                 .font(Brand.text(13))
                 .foregroundStyle(Brand.muted)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Thanks to transcribe.cpp and Handy (MIT), NVIDIA Parakeet (\(SpeechModelChoice.parakeet.license)) and OpenAI Whisper (\(SpeechModelChoice.whisperTurbo.license)). Licenses are inside the app, in Contents/Resources/Licenses.")
+                .font(Brand.text(12))
+                .foregroundStyle(Brand.faint)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 10) {
                 Button("stupidesigner.com") {

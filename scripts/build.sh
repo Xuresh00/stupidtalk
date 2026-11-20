@@ -27,6 +27,7 @@ OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 
 echo "== Building $APP_NAME $VERSION ($BUILD_NUMBER)"
 swift --version
+"$PROJECT/scripts/fetch-engine.sh"
 BUILD_ARGS=(--package-path "$PROJECT" --scratch-path "$BUILD_ROOT/swift" -c release --product "$APP_NAME")
 swift build "${BUILD_ARGS[@]}"
 BIN_PATH="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
@@ -41,8 +42,36 @@ cp "$PROJECT"/Sources/StupidTalk/Resources/* "$APP/Contents/Resources/"
 iconutil -c icns "$PROJECT/Packaging/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
 sed -e "s/__VERSION__/$VERSION/g" -e "s/__BUILD__/$BUILD_NUMBER/g" "$PROJECT/Packaging/Info.plist" > "$APP/Contents/Info.plist"
 
+# The speech engine (transcribe.cpp) is a framework the app loads at launch.
+FRAMEWORK="$BIN_PATH/CTranscribe.framework"
+if [ ! -d "$FRAMEWORK" ]; then
+    FRAMEWORK="$(find "$PROJECT/Vendor/TranscribeCpp.xcframework" -maxdepth 2 -type d -name CTranscribe.framework -path '*macos*' | head -n 1)"
+fi
+if [ -z "$FRAMEWORK" ] || [ ! -d "$FRAMEWORK" ]; then
+    echo "Could not find CTranscribe.framework. Run scripts/fetch-engine.sh and try again." >&2
+    exit 1
+fi
+mkdir -p "$APP/Contents/Frameworks"
+ditto "$FRAMEWORK" "$APP/Contents/Frameworks/CTranscribe.framework"
+if ! otool -l "$APP/Contents/MacOS/$APP_NAME" | grep -q "@executable_path/../Frameworks"; then
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/$APP_NAME"
+fi
+
+# Licenses of everything bundled.
+LICENSES="$APP/Contents/Resources/Licenses"
+mkdir -p "$LICENSES"
+cp "$PROJECT/LICENSE" "$LICENSES/StupidTalk-LICENSE.txt"
+cp "$PROJECT/Vendor/TranscribeCpp/LICENSE" "$LICENSES/transcribe.cpp-LICENSE.txt"
+cp "$PROJECT/Vendor/TranscribeCpp/THIRD-PARTY-LICENSES.md" "$LICENSES/transcribe.cpp-THIRD-PARTY-LICENSES.md"
+for extra in "$PROJECT"/Vendor/TranscribeCpp.xcframework/LICENSE.*; do
+    if [ -e "$extra" ]; then
+        cp "$extra" "$LICENSES/transcribe.cpp-$(basename "$extra").txt"
+    fi
+done
+
 # Ad-hoc signature: enough to run on Apple silicon. It is not a Developer ID signature
-# and the app is not notarized.
+# and the app is not notarized. The framework is signed first, then the app around it.
+codesign --force --sign - "$APP/Contents/Frameworks/CTranscribe.framework"
 codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
 codesign --verify --strict --verbose=2 "$APP"
 

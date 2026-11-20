@@ -5,6 +5,11 @@ set -euo pipefail
 PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
 ARGS=(--package-path "$PROJECT")
 
+if [ "$(uname)" = "Darwin" ]; then
+    # The app target needs the speech engine on disk, even though the tests don't use it.
+    "$PROJECT/scripts/fetch-engine.sh"
+fi
+
 if [ "$(uname)" = "Darwin" ] && ! xcodebuild -version >/dev/null 2>&1; then
     # Only the Command Line Tools are installed: there is no XCTest, and the
     # Swift Testing macro plugin has to be pointed at by hand.

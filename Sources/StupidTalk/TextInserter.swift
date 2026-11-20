@@ -1,100 +1,155 @@
 import AppKit
+import StupidTalkCore
 
-enum InsertResult {
-    /// The text was pasted at the cursor.
-    case pasted
-    /// Accessibility permission is missing, so the text was only put on the clipboard.
-    case copiedOnly
+/// How the text gets into the app you are using.
+enum InsertMethod: String, CaseIterable {
+    /// Types the words like a keyboard would. Your clipboard is never touched. The default.
+    case type
+    /// Puts the words on the clipboard, presses Command-V, then puts your clipboard back.
+    case paste
+
+    var title: String {
+        switch self {
+        case .type: return "Type it (your clipboard stays as it is)"
+        case .paste: return "Paste it"
+        }
+    }
 }
 
-/// Types text at the cursor of whatever app is in front.
+enum InsertResult {
+    case inserted
+    /// macOS has not allowed StupidTalk to press keys yet (Accessibility).
+    case needsAccessibility
+}
+
+/// Puts text where your cursor is.
 ///
-/// It does this the way almost every dictation app does: put the text on the clipboard,
-/// press Command-V for you, then put your old clipboard back.
+/// By default it types: the words go in as key presses, a few characters at a time, so
+/// whatever you copied before stays on your clipboard. Line breaks are typed as Shift-Return,
+/// which makes a new line in chat apps instead of sending the message.
 final class TextInserter {
-    /// Clipboard managers skip entries marked with this type (nspasteboard.org convention).
+    /// Marks the key presses StupidTalk makes, so its own key watcher can ignore them.
+    static let eventMarker: Int64 = 0x5354_414C_4B
+
     private static let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
-    /// Bigger clipboards than this are not saved and restored.
-    private static let snapshotLimit = 30 * 1024 * 1024
+    private let typingQueue = DispatchQueue(label: "com.stupidesigner.stupidtalk.typing", qos: .userInteractive)
 
-    func insert(_ text: String, keepOnClipboard: Bool) -> InsertResult {
-        let pasteboard = NSPasteboard.general
-        guard Permissions.accessibilityGranted else {
-            pasteboard.clearContents()
-            pasteboard.setString(text, forType: .string)
-            return .copiedOnly
-        }
-
-        let saved = keepOnClipboard ? nil : snapshot(of: pasteboard)
-        pasteboard.clearContents()
-        if keepOnClipboard {
-            pasteboard.setString(text, forType: .string)
-        } else {
-            pasteboard.declareTypes([.string, Self.transientType], owner: nil)
-            pasteboard.setString(text, forType: .string)
-            pasteboard.setData(Data(), forType: Self.transientType)
-        }
-        let changeCount = pasteboard.changeCount
-
-        pressCommandV()
-
-        if let saved {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                // If you copied something else in the meantime, leave it alone.
-                guard pasteboard.changeCount == changeCount else { return }
-                TextInserter.restore(saved, to: pasteboard)
+    @MainActor
+    func insert(_ text: String, method: InsertMethod) async -> InsertResult {
+        guard Permissions.accessibilityGranted else { return .needsAccessibility }
+        switch method {
+        case .type:
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                typingQueue.async {
+                    Self.type(text)
+                    continuation.resume()
+                }
             }
+        case .paste:
+            await paste(text)
         }
-        return .pasted
+        return .inserted
     }
 
-    /// Puts text on the clipboard and leaves it there.
+    /// Puts the text on the clipboard and leaves it there. Only when you ask for it.
+    @MainActor
     func copy(_ text: String) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
     }
 
-    private func pressCommandV() {
-        let source = CGEventSource(stateID: .combinedSessionState)
-        // Virtual key 9 is the V key on a QWERTY layout.
-        let keyV: CGKeyCode = 9
-        guard let down = CGEvent(keyboardEventSource: source, virtualKey: keyV, keyDown: true),
-              let up = CGEvent(keyboardEventSource: source, virtualKey: keyV, keyDown: false) else { return }
+    // MARK: Typing
+
+    private static func type(_ text: String) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        for chunk in TypingChunks.split(text) {
+            switch chunk {
+            case .text(let piece):
+                let units = Array(piece.utf16)
+                guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+                      let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else { continue }
+                units.withUnsafeBufferPointer { buffer in
+                    down.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
+                    up.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
+                }
+                // No modifiers, even if one is still held: Option plus a letter would type a symbol.
+                down.flags = []
+                up.flags = []
+                post(down)
+                post(up)
+            case .lineBreak:
+                // Key code 36 is Return.
+                guard let down = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true),
+                      let up = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false) else { continue }
+                down.flags = .maskShift
+                up.flags = .maskShift
+                post(down)
+                post(up)
+            }
+            // A short pause between key presses, so busy apps keep up and drop nothing.
+            usleep(3_000)
+        }
+    }
+
+    private static func post(_ event: CGEvent) {
+        event.setIntegerValueField(.eventSourceUserData, value: eventMarker)
+        event.post(tap: .cghidEventTap)
+    }
+
+    // MARK: Pasting
+
+    @MainActor
+    private func paste(_ text: String) async {
+        let pasteboard = NSPasteboard.general
+        let saved = Self.snapshot(of: pasteboard)
+
+        pasteboard.clearContents()
+        // Marked as temporary, so clipboard managers skip it.
+        pasteboard.declareTypes([.string, Self.transientType], owner: nil)
+        pasteboard.setString(text, forType: .string)
+        pasteboard.setData(Data(), forType: Self.transientType)
+        let ours = pasteboard.changeCount
+
+        Self.pressCommandV()
+
+        // Give the app a moment to read it, then put your clipboard back exactly as it was.
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        guard pasteboard.changeCount == ours else { return } // You copied something new meanwhile.
+        pasteboard.clearContents()
+        if !saved.isEmpty {
+            let items = saved.map { types -> NSPasteboardItem in
+                let item = NSPasteboardItem()
+                for (type, data) in types {
+                    item.setData(data, forType: type)
+                }
+                return item
+            }
+            pasteboard.writeObjects(items)
+        }
+    }
+
+    private static func pressCommandV() {
+        let source = CGEventSource(stateID: .hidSystemState)
+        // Key code 9 is V on a US-style layout.
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false) else { return }
         down.flags = .maskCommand
         up.flags = .maskCommand
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
+        post(down)
+        post(up)
     }
 
-    private func snapshot(of pasteboard: NSPasteboard) -> [[NSPasteboard.PasteboardType: Data]]? {
-        var total = 0
-        var items: [[NSPasteboard.PasteboardType: Data]] = []
-        for item in pasteboard.pasteboardItems ?? [] {
-            var contents: [NSPasteboard.PasteboardType: Data] = [:]
+    /// Every item and every type on the clipboard, so it can be put back as it was.
+    private static func snapshot(of pasteboard: NSPasteboard) -> [[NSPasteboard.PasteboardType: Data]] {
+        (pasteboard.pasteboardItems ?? []).map { item in
+            var types: [NSPasteboard.PasteboardType: Data] = [:]
             for type in item.types {
-                guard let data = item.data(forType: type) else { continue }
-                total += data.count
-                if total > Self.snapshotLimit { return nil }
-                contents[type] = data
+                if let data = item.data(forType: type) {
+                    types[type] = data
+                }
             }
-            items.append(contents)
-        }
-        return items
-    }
-
-    private static func restore(_ items: [[NSPasteboard.PasteboardType: Data]], to pasteboard: NSPasteboard) {
-        pasteboard.clearContents()
-        let objects: [NSPasteboardItem] = items.compactMap { contents in
-            guard !contents.isEmpty else { return nil }
-            let item = NSPasteboardItem()
-            for (type, data) in contents {
-                item.setData(data, forType: type)
-            }
-            return item
-        }
-        if !objects.isEmpty {
-            pasteboard.writeObjects(objects)
+            return types
         }
     }
 }

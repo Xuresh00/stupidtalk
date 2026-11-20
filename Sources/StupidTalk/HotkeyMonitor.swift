@@ -59,6 +59,10 @@ final class HotkeyMonitor {
     }
 
     private func handle(_ event: NSEvent) {
+        // Key presses StupidTalk makes itself while typing your words are not you.
+        if event.cgEvent?.getIntegerValueField(.eventSourceUserData) == TextInserter.eventMarker {
+            return
+        }
         let action: HoldToTalk.Action
         switch event.type {
         case .flagsChanged:

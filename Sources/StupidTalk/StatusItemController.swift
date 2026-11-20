@@ -89,7 +89,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         menu.addItem(.separator())
 
-        let cleanup = item("AI clean-up", #selector(toggleCleanup))
+        let cleanup = item("AI polish", #selector(toggleCleanup))
         cleanup.state = state.aiCleanupEnabled ? .on : .off
         menu.addItem(cleanup)
         if state.aiCleanupEnabled, case .off(let reason) = state.aiStatus {
@@ -100,7 +100,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
 
         let hasLast = state.lastEntry != nil
-        let paste = item("Paste last result again", #selector(pasteLast))
+        let paste = item("Type last result again", #selector(pasteLast))
         paste.isEnabled = hasLast
         menu.addItem(paste)
         let copy = item("Copy last result", #selector(copyLast))
@@ -127,7 +127,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         switch state.speechStatus {
         case .ready: break
-        case .downloading: return "Downloading the speech model"
+        case .downloading(let fraction): return "Downloading the speech model (\(Int(fraction * 100))%)"
+        case .loading: return "Loading the speech model"
         default: return "Speech model not ready. Open Check setup."
         }
         switch state.phase {
@@ -156,7 +157,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func pasteLast() {
-        controller.pasteLastResult()
+        controller.typeLastResult()
     }
 
     @objc private func copyLast() {

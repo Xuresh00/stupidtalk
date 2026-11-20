@@ -7,3 +7,10 @@ xcuserdata/
 DerivedData/
 .DS_Store
 __pycache__/
+
+# The speech engine framework is downloaded by scripts/fetch-engine.sh, not stored in git.
+Vendor/TranscribeCpp.xcframework/
+Vendor/*.zip
+Vendor/*.part
+Vendor/unpack/
+Vendor/.transcribe-version

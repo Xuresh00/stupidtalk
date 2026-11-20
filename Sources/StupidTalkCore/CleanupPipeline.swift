@@ -23,7 +23,8 @@ public enum CleanupPipeline {
 
     public static func prepare(raw: String, vocabulary: Vocabulary) -> String {
         let collapsed = raw.replacingRegex("[ \\t]+", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-        return vocabulary.applyReplacements(to: collapsed)
+        // Exact "sounds like" swaps first, then near misses the speech model almost got right.
+        return vocabulary.applyFuzzyCorrections(to: vocabulary.applyReplacements(to: collapsed))
     }
 
     /// True when the text is long enough for the model to be worth the wait.

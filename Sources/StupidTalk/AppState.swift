@@ -21,9 +21,9 @@ enum DictationPhase: Equatable {
     case cleaning
 }
 
-/// When the on-device model is asked to help.
+/// When the optional on-device model is asked to help. It is off unless you switch it on.
 enum AIMode: String, CaseIterable {
-    /// The model polishes every dictation: lists, brackets, grammar, punctuation. Usually well under a second.
+    /// The model looks at every dictation for small grammar fixes. Usually well under a second.
     case always
     /// Rules only, unless you correct yourself in a way the rules are not sure about. The fastest.
     case smart
@@ -52,13 +52,14 @@ final class AppState: ObservableObject {
         static let aiCleanup = "aiCleanupEnabled"
         static let aiMode = "aiMode"
         static let microphone = "microphone"
-        static let locale = "localeIdentifier"
-        static let keepOnClipboard = "keepOnClipboard"
+        static let speechModel = "speechModel"
+        static let insertMethod = "insertMethod"
         static let trailingSpace = "addTrailingSpace"
         static let sounds = "playSounds"
         static let saveHistory = "saveHistory"
         static let setupFinished = "setupFinished"
         static let totalWords = "totalWords"
+        static let settingsVersion = "settingsVersion"
     }
 
     private let defaults = UserDefaults.standard
@@ -78,11 +79,11 @@ final class AppState: ObservableObject {
     @Published var microphone: MicrophoneChoice {
         didSet { defaults.set(microphone.rawValue, forKey: Keys.microphone) }
     }
-    @Published var localeIdentifier: String {
-        didSet { defaults.set(localeIdentifier, forKey: Keys.locale) }
+    @Published var speechModel: SpeechModelChoice {
+        didSet { defaults.set(speechModel.rawValue, forKey: Keys.speechModel) }
     }
-    @Published var keepOnClipboard: Bool {
-        didSet { defaults.set(keepOnClipboard, forKey: Keys.keepOnClipboard) }
+    @Published var insertMethod: InsertMethod {
+        didSet { defaults.set(insertMethod.rawValue, forKey: Keys.insertMethod) }
     }
     @Published var addTrailingSpace: Bool {
         didSet { defaults.set(addTrailingSpace, forKey: Keys.trailingSpace) }
@@ -113,27 +114,30 @@ final class AppState: ObservableObject {
     @Published var accessibilityGranted = false
     @Published var speechStatus: SpeechModelStatus = .unknown
     @Published var aiStatus: AIStatus = .off("Checking")
-    @Published var availableLocales: [String] = []
     @Published var settingsTab: SettingsTab = .general
 
     init() {
         let support = AppInfo.supportDirectory
         vocabularyURL = support.appendingPathComponent("word-list.json")
         historyStore = HistoryStore(fileURL: support.appendingPathComponent("history.json"), limit: 200)
+        AppState.migrateSettings(defaults)
 
         hotkey = HotkeyChoice(rawValue: defaults.string(forKey: Keys.hotkey) ?? "") ?? .rightOption
-        aiCleanupEnabled = defaults.object(forKey: Keys.aiCleanup) as? Bool ?? true
-        aiMode = AIMode(rawValue: defaults.string(forKey: Keys.aiMode) ?? "") ?? .always
+        aiCleanupEnabled = defaults.object(forKey: Keys.aiCleanup) as? Bool ?? false
+        aiMode = AIMode(rawValue: defaults.string(forKey: Keys.aiMode) ?? "") ?? .smart
         microphone = MicrophoneChoice(rawValue: defaults.string(forKey: Keys.microphone) ?? "") ?? .builtIn
-        localeIdentifier = defaults.string(forKey: Keys.locale) ?? AppState.defaultLocaleIdentifier()
-        keepOnClipboard = defaults.object(forKey: Keys.keepOnClipboard) as? Bool ?? false
+        speechModel = SpeechModelChoice(rawValue: defaults.string(forKey: Keys.speechModel) ?? "") ?? .parakeet
+        insertMethod = InsertMethod(rawValue: defaults.string(forKey: Keys.insertMethod) ?? "") ?? .type
         addTrailingSpace = defaults.object(forKey: Keys.trailingSpace) as? Bool ?? true
         playSounds = defaults.object(forKey: Keys.sounds) as? Bool ?? false
         saveHistory = defaults.object(forKey: Keys.saveHistory) as? Bool ?? true
         setupFinished = defaults.bool(forKey: Keys.setupFinished)
         totalWords = defaults.integer(forKey: Keys.totalWords)
 
-        if let saved = VocabularyFile.load(from: vocabularyURL) {
+        if var saved = VocabularyFile.load(from: vocabularyURL) {
+            if AppState.addKnownMishearings(to: &saved) {
+                VocabularyFile.save(saved, to: vocabularyURL)
+            }
             vocabulary = saved
         } else {
             vocabulary = Vocabulary.starter
@@ -145,13 +149,32 @@ final class AppState: ObservableObject {
         accessibilityGranted = Permissions.accessibilityGranted
     }
 
-    /// English as set on this Mac when possible ("en_IN" in India), otherwise US English.
-    static func defaultLocaleIdentifier() -> String {
-        let current = Locale.current
-        if current.language.languageCode?.identifier == "en" {
-            return current.identifier
+    /// Settings from older versions, brought up to date once.
+    ///
+    /// 0.2.0 types exactly what you said: the AI polish starts switched off (it was adding
+    /// commas and brackets nobody asked for), and the clipboard and accent settings are gone.
+    private static func migrateSettings(_ defaults: UserDefaults) {
+        guard defaults.integer(forKey: Keys.settingsVersion) < 2 else { return }
+        defaults.set(false, forKey: Keys.aiCleanup)
+        defaults.set(AIMode.smart.rawValue, forKey: Keys.aiMode)
+        defaults.removeObject(forKey: "keepOnClipboard")
+        defaults.removeObject(forKey: "localeIdentifier")
+        defaults.set(2, forKey: Keys.settingsVersion)
+    }
+
+    /// Adds mishearings found in real use to a word list made by an older version.
+    /// Returns true when something was added.
+    private static func addKnownMishearings(to vocabulary: inout Vocabulary) -> Bool {
+        let known: [String: [String]] = ["StupidTalk": ["stupid dark"]]
+        var changed = false
+        for (word, extras) in known {
+            guard let index = vocabulary.entries.firstIndex(where: { $0.word == word }) else { continue }
+            for extra in extras where !vocabulary.entries[index].soundsLike.contains(where: { $0.lowercased() == extra }) {
+                vocabulary.entries[index].soundsLike.append(extra)
+                changed = true
+            }
         }
-        return "en_US"
+        return changed
     }
 
     var everythingReady: Bool {

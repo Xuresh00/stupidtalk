@@ -12,14 +12,13 @@ enum MicrophonePermission: Equatable {
 enum SettingsPane: String {
     case microphone = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
     case accessibility = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-    case speechRecognition = "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
     case appleIntelligence = "x-apple.systempreferences:com.apple.Siri-Settings.extension"
     case keyboard = "x-apple.systempreferences:com.apple.Keyboard-Settings.extension"
 }
 
 /// StupidTalk needs two permissions:
 /// - Microphone, to hear you.
-/// - Accessibility, to notice the hold-to-talk key in any app and to paste the text at your cursor.
+/// - Accessibility, to notice the hold-to-talk key in any app and to type the words at your cursor.
 enum Permissions {
     static var microphone: MicrophonePermission {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {

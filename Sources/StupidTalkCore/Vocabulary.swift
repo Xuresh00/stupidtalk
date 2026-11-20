@@ -65,7 +65,7 @@ public struct Vocabulary: Codable, Equatable, Sendable {
     /// The list a fresh install starts with.
     public static let starter = Vocabulary(entries: [
         VocabularyEntry(word: "Stupidesigner", soundsLike: ["stupid designer", "stupid e signer", "stupidesigner"]),
-        VocabularyEntry(word: "StupidTalk", soundsLike: ["stupid talk"]),
+        VocabularyEntry(word: "StupidTalk", soundsLike: ["stupid talk", "stupid dark"]),
         VocabularyEntry(word: "Mr. Oops", soundsLike: ["mister oops", "mr oops", "mister oups", "mister ups"])
     ])
 }

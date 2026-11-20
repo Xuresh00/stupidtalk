@@ -1,14 +1,12 @@
 import AppKit
 import AVFoundation
-import Speech
 import StupidTalkCore
 
 /// Runs one dictation from start to finish:
-/// hold the key, record, speech to text, clean up, paste at the cursor.
+/// hold the key, record, speech to text on this Mac, tidy up, type it at the cursor.
 ///
-/// Speed comes first. The text is typed as soon as it has been heard and tidied by rule.
-/// The on-device model is only asked when you corrected yourself in a way the rules are
-/// not sure about, and it always has a time limit.
+/// Speed comes first. The words are typed as soon as they have been heard and tidied by rule.
+/// The optional AI polish is off unless you switch it on, and it always has a time limit.
 @MainActor
 final class DictationController {
     /// How long the model may take for one unsure self-correction before the rule-based text is typed.
@@ -20,6 +18,9 @@ final class DictationController {
         min(4.0, 1.5 + 0.015 * Double(words))
     }
 
+    /// How long the Copy button stays in the pill after the words are typed.
+    private static let copySeconds = 2.0
+
     /// The "allow Accessibility" hint opens the setup window only once per launch.
     private var askedForAccessibility = false
 
@@ -27,11 +28,11 @@ final class DictationController {
     private let windows: WindowCoordinator
     private let hotkeys: HotkeyMonitor
     private let recorder = AudioRecorder()
-    private let speech = SpeechEngine()
+    private let engine = SpeechEngine()
+    private let models = ModelStore()
     private let cleaner = AICleaner()
     private let inserter = TextInserter()
     private let overlay: OverlayController
-    private let converter = BufferConverter()
 
     private var current: Session?
     private var statusTimer: Timer?
@@ -42,8 +43,8 @@ final class DictationController {
     private final class Session {
         let startedAt = Date()
         let targetApp: String?
-        var continuation: AsyncStream<AnalyzerInput>.Continuation?
-        var transcription: Task<String, Error>?
+        /// Your voice, as 16 kHz samples, filled in while you hold the key.
+        let samples = SampleCollector()
         /// The key came up (or the dictation was cancelled). No more audio is wanted.
         var released = false
         var cancelled = false
@@ -73,14 +74,18 @@ final class DictationController {
             self?.handle(action)
         }
         hotkeys.start()
+        overlay.copyHandler = { [weak self] text in
+            self?.inserter.copy(text)
+            Log.info("Copied the latest dictation from the pill")
+        }
         refreshStatus()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refreshStatus()
             }
         }
+        ModelStore.removeLeftovers()
         Task { @MainActor in
-            await self.loadLocales()
             await self.prepareSpeech()
         }
         warmUpAI(speedTest: true)
@@ -132,57 +137,73 @@ final class DictationController {
         }
     }
 
-    private func loadLocales() async {
-        let identifiers = await SpeechEngine.englishLocaleIdentifiers()
-        state.availableLocales = identifiers
-    }
-
-    /// Checks the speech model and loads it when it is installed.
+    /// Loads the chosen speech model onto the GPU when it is downloaded.
     func prepareSpeech() async {
-        let identifier = state.localeIdentifier
-        let status = await speech.status(localeIdentifier: identifier)
-        if case .downloading = state.speechStatus, case .downloading = status {
+        let choice = state.speechModel
+        if models.downloading == choice { return }
+        guard ModelStore.isInstalled(choice) else {
+            state.speechStatus = .needsDownload
+            Log.info("Speech model \(choice.rawValue) is not downloaded yet")
             return
         }
-        state.speechStatus = status
-        guard status == .ready else {
-            Log.info("Speech model is not ready")
-            return
-        }
+        state.speechStatus = .loading
+        let started = Date()
         do {
-            let started = Date()
-            try await speech.prepare(localeIdentifier: identifier)
-            Log.info("Speech model loaded in \(Self.ms(since: started)) ms")
+            let backend = try await engine.load(ModelStore.fileURL(for: choice))
+            guard state.speechModel == choice else { return }
+            state.speechStatus = .ready
+            Log.info("Speech model \(choice.rawValue) loaded on \(backend) in \(Self.ms(since: started)) ms")
         } catch {
-            Log.info("Could not load the speech model: \(error.localizedDescription)")
+            guard state.speechModel == choice else { return }
+            Log.info("Could not load the speech model: \(error)")
+            state.speechStatus = .unavailable(SpeechEngine.plainMessage(for: error))
         }
     }
 
-    /// Downloads the on-device speech model through macOS.
-    func installSpeechModel() {
-        if case .downloading = state.speechStatus { return }
+    /// Downloads the chosen speech model. The only download StupidTalk ever makes.
+    func downloadSpeechModel() {
+        let choice = state.speechModel
+        if models.downloading == choice { return }
         state.speechStatus = .downloading(0)
-        let identifier = state.localeIdentifier
-        Task { @MainActor in
-            do {
-                try await self.speech.install(localeIdentifier: identifier) { fraction in
-                    Task { @MainActor in
-                        if case .downloading = self.state.speechStatus {
-                            self.state.speechStatus = .downloading(fraction)
-                        }
-                    }
-                }
-                self.state.speechStatus = .unknown
-                await self.prepareSpeech()
-            } catch {
-                Log.info("Speech model download failed: \(error.localizedDescription)")
-                self.state.speechStatus = .unavailable("The download didn't finish. Check your internet and try again.")
+        Log.info("Downloading speech model \(choice.rawValue)")
+        let started = Date()
+        models.download(choice, progress: { [weak self] fraction in
+            MainActor.assumeIsolated {
+                guard let self, self.state.speechModel == choice, case .downloading = self.state.speechStatus else { return }
+                self.state.speechStatus = .downloading(fraction)
             }
-        }
+        }, completion: { [weak self] result in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                switch result {
+                case .success:
+                    Log.info("Speech model downloaded and checked in \(Int(Date().timeIntervalSince(started))) s")
+                    guard self.state.speechModel == choice else { return }
+                    Task { @MainActor in
+                        await self.prepareSpeech()
+                    }
+                case .failure(let error):
+                    Log.info("Speech model download failed: \(error.localizedDescription)")
+                    guard self.state.speechModel == choice else { return }
+                    self.state.speechStatus = .unavailable("The download didn't finish. Check your internet and try again.")
+                }
+            }
+        })
     }
 
-    /// Call after the language setting changes.
-    func languageChanged() {
+    /// Throws the model file away and downloads it again. For a file that will not load.
+    func redownloadSpeechModel() {
+        engine.unload()
+        ModelStore.remove(state.speechModel)
+        downloadSpeechModel()
+    }
+
+    /// Call after the speech model setting changes.
+    func speechModelChanged() {
+        if let other = models.downloading, other != state.speechModel {
+            models.cancel()
+        }
+        engine.unload()
         state.speechStatus = .unknown
         Task { @MainActor in
             await self.prepareSpeech()
@@ -215,13 +236,15 @@ final class DictationController {
 
     // MARK: Menu actions
 
-    func pasteLastResult() {
+    func typeLastResult() {
         guard let entry = state.lastEntry else { return }
-        // Give the menu a moment to close so the paste lands in the app behind it.
+        // Give the menu a moment to close so the words land in the app behind it.
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 250_000_000)
             let text = self.state.addTrailingSpace ? entry.cleaned + " " : entry.cleaned
-            _ = self.inserter.insert(text, keepOnClipboard: self.state.keepOnClipboard)
+            if await self.inserter.insert(text, method: self.state.insertMethod) == .needsAccessibility {
+                self.problem("Allow Accessibility so I can type for you.", openSetup: true)
+            }
         }
     }
 
@@ -238,7 +261,8 @@ final class DictationController {
     func copySpeedReport() {
         var lines = ["StupidTalk \(AppInfo.version) speed report"]
         lines.append("macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
-        lines.append("Key: \(state.hotkey.shortTitle). AI clean-up: \(state.aiCleanupEnabled ? state.aiMode.title : "off"). Model: \(state.aiStatus.isReady ? "ready" : "not ready").")
+        lines.append("Key: \(state.hotkey.shortTitle). Speech model: \(state.speechModel.rawValue) (\(state.speechStatus == .ready ? "ready" : "not ready")). Typing: \(state.insertMethod.rawValue).")
+        lines.append("AI polish: \(state.aiCleanupEnabled ? state.aiMode.title : "off"). Apple model: \(state.aiStatus.isReady ? "ready" : "not ready").")
         if let problem = Log.problem {
             lines.append("The log file could not be written: \(problem)")
         }
@@ -269,7 +293,16 @@ final class DictationController {
             problem("I need the microphone first.", openSetup: true)
             return
         }
-        guard state.speechStatus == .ready else {
+        switch state.speechStatus {
+        case .ready:
+            break
+        case .downloading(let fraction):
+            problem("Still downloading the speech model (\(Int(fraction * 100))%).", openSetup: false)
+            return
+        case .loading:
+            problem("One moment, the speech model is still loading.", openSetup: false)
+            return
+        default:
             Log.info("Key pressed, but the speech model is not ready")
             problem("The speech model isn't ready yet.", openSetup: true)
             return
@@ -287,46 +320,20 @@ final class DictationController {
         if state.playSounds { Sounds.start() }
         Log.info("Listening")
 
-        let words = state.vocabulary.words
-        let locale = state.localeIdentifier
-
-        let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
-        session.continuation = continuation
-        let speech = self.speech
-        session.transcription = Task(priority: .userInitiated) {
-            try await speech.transcribe(stream: stream, localeIdentifier: locale, vocabulary: words)
-        }
-        // Have the model loaded by the time you stop talking, in case it is needed.
+        // Have the optional AI loaded by the time you stop talking, in case it is needed.
         warmUpAI()
         watchForRelease(session)
-
-        if let format = speech.analyzerFormat {
-            startRecording(session, format: format)
-        } else {
-            // First dictation after launch, before the model finished loading.
-            Task { @MainActor in
-                do {
-                    try await speech.prepare(localeIdentifier: locale)
-                    guard let format = speech.analyzerFormat else { throw SpeechEngineError.noAudioFormat }
-                    guard self.current === session, !session.released else { return }
-                    self.startRecording(session, format: format)
-                } catch {
-                    self.fail(session, error: error)
-                }
-            }
-        }
+        startRecording(session)
     }
 
-    private func startRecording(_ session: Session, format: AVAudioFormat) {
-        guard let continuation = session.continuation else { return }
-        let converter = self.converter
+    private func startRecording(_ session: Session) {
+        let samples = session.samples
+        let resampler = Resampler()
         let model = overlay.model
         recorder.start(
             preferBuiltInMicrophone: state.microphone == .builtIn,
             onBuffer: { buffer in
-                if let converted = try? converter.convert(buffer, to: format) {
-                    continuation.yield(AnalyzerInput(buffer: converted))
-                }
+                samples.append(resampler.convert(buffer))
             },
             onLevel: { level in
                 DispatchQueue.main.async {
@@ -387,7 +394,6 @@ final class DictationController {
         overlay.show(.thinking)
         recorder.stop { [weak self] in
             Task { @MainActor in
-                session.continuation?.finish()
                 self?.process(session)
             }
         }
@@ -399,36 +405,43 @@ final class DictationController {
         session.cancelled = true
         stopWatchingForRelease()
         Log.info("Cancelled")
-        recorder.stop {
-            Task { @MainActor in
-                session.continuation?.finish()
-                session.transcription?.cancel()
-            }
-        }
+        recorder.stop {}
         overlay.hide()
         end(session)
     }
 
     private func process(_ session: Session) {
-        guard !session.cancelled, let transcription = session.transcription else {
+        guard !session.cancelled else {
             end(session)
             return
         }
+        let samples = session.samples.snapshot()
+        let words = state.vocabulary.words
+        let engine = self.engine
         Task(priority: .userInitiated) { @MainActor in
+            guard let range = AudioTrim.speechRange(samples) else {
+                Log.info("Heard only silence. \(self.timing(session, heardAt: Date()))")
+                self.overlay.flash(.message("I didn't catch that.", .confused), seconds: 1.6)
+                self.end(session)
+                return
+            }
+            let clip = Array(samples[range])
             do {
-                let heard: String = try await Race.withTimeout(seconds: 45) {
-                    try await transcription.value
+                let heard = try await Race.withTimeout(seconds: 45) {
+                    try await engine.transcribe(clip, vocabulary: words)
                 }
                 let heardAt = Date()
-                let raw = heard.trimmingCharacters(in: .whitespacesAndNewlines)
+                let raw = heard.text
                 guard !raw.isEmpty else {
                     Log.info("Heard nothing. \(self.timing(session, heardAt: heardAt))")
                     self.overlay.flash(.message("I didn't catch that.", .confused), seconds: 1.6)
                     self.end(session)
                     return
                 }
+                let speech = "speech \(heard.milliseconds) ms for \(String(format: "%.1f", Double(clip.count) / 16_000)) s of audio"
 
-                // The fast path: word list, self-corrections the rules are sure about, fillers, punctuation.
+                // The fast path: word list, self-corrections the rules are sure about, fillers.
+                // Nothing here adds commas, brackets or lists of its own.
                 let vocabulary = self.state.vocabulary
                 let prepared = CleanupPipeline.prepare(raw: raw, vocabulary: vocabulary)
                 let plan = CleanupPipeline.plan(prepared: prepared, vocabulary: vocabulary)
@@ -453,14 +466,14 @@ final class DictationController {
                 } else if plan.window != nil {
                     how += ", one correction left as said"
                 }
-                self.deliver(piece, raw: raw, session: session, heardAt: heardAt, how: how)
+                await self.deliver(piece, raw: raw, session: session, heardAt: heardAt, how: how + ", " + speech)
             } catch {
                 self.fail(session, error: error)
             }
         }
     }
 
-    private func deliver(_ piece: CleanupPipeline.Piece, raw: String, session: Session, heardAt: Date, how: String) {
+    private func deliver(_ piece: CleanupPipeline.Piece, raw: String, session: Session, heardAt: Date, how: String) async {
         guard !piece.text.isEmpty else {
             Log.info("Nothing left to type after the clean-up. \(timing(session, heardAt: heardAt))")
             overlay.flash(.message("I didn't catch that.", .confused), seconds: 1.6)
@@ -468,7 +481,8 @@ final class DictationController {
             return
         }
         let text = state.addTrailingSpace ? piece.text + " " : piece.text
-        let result = inserter.insert(text, keepOnClipboard: state.keepOnClipboard)
+        let method = state.insertMethod
+        let result = await inserter.insert(text, method: method)
         let typedAt = Date()
         let wait = typedAt.timeIntervalSince(session.releasedAt ?? typedAt)
         state.record(HistoryEntry(
@@ -480,20 +494,20 @@ final class DictationController {
             wait: wait
         ))
 
-        var line = "Typed \(Words.count(piece.text)) words \(Self.ms(wait)) ms after the key came up. "
+        var line = "Typed \(Words.count(piece.text)) words (\(method.rawValue)) \(Self.ms(wait)) ms after the key came up. "
         line += timing(session, heardAt: heardAt)
         line += " Clean-up: \(how)."
         if let note = piece.note { line += " Model answer not used: \(note)." }
-        if result == .copiedOnly { line += " Only copied, Accessibility is missing." }
+        if result == .needsAccessibility { line += " Not typed, Accessibility is missing." }
         Log.info(line)
 
         switch result {
-        case .pasted:
+        case .inserted:
             if state.playSounds { Sounds.done() }
-            overlay.flash(.done, seconds: 0.9)
-        case .copiedOnly:
-            // macOS has not allowed StupidTalk to paste. The text is on the clipboard meanwhile.
-            overlay.flash(.message("Copied. Allow Accessibility so I can paste for you.", .point), seconds: 3.5)
+            // Your clipboard is untouched. The button is there if you want the words on it too.
+            overlay.offerCopy(piece.text, seconds: Self.copySeconds)
+        case .needsAccessibility:
+            overlay.offerCopy(piece.text, note: "Allow Accessibility so I can type for you.", seconds: 6)
             if !askedForAccessibility {
                 askedForAccessibility = true
                 Permissions.promptForAccessibility()
@@ -501,7 +515,7 @@ final class DictationController {
             }
         }
         end(session)
-        // Load a fresh model session for the next time.
+        // Load a fresh AI session for the next time, when the AI polish is on.
         warmUpAI()
     }
 
@@ -510,35 +524,9 @@ final class DictationController {
         session.released = true
         session.cancelled = true
         stopWatchingForRelease()
-        recorder.stop {
-            Task { @MainActor in
-                session.continuation?.finish()
-                session.transcription?.cancel()
-            }
-        }
-        // Only an error that comes from macOS's speech system itself can be a permission problem.
-        let ownError = error is RecorderError || error is SpeechEngineError || error is Race.TimedOut || error is CancellationError
-        if !ownError, let message = speechPermissionMessage() {
-            problem(message, openSetup: false)
-        } else {
-            problem(DictationController.friendly(error), openSetup: false)
-        }
+        recorder.stop {}
+        problem(Self.friendly(error), openSetup: false)
         end(session)
-    }
-
-    /// On-device speech normally needs no extra permission. If macOS wants the Speech
-    /// Recognition permission after all, ask for it the first time a dictation fails.
-    private func speechPermissionMessage() -> String? {
-        switch SFSpeechRecognizer.authorizationStatus() {
-        case .notDetermined:
-            SFSpeechRecognizer.requestAuthorization { _ in }
-            return "Allow speech recognition, then try again."
-        case .denied, .restricted:
-            Permissions.open(.speechRecognition)
-            return "Speech recognition is switched off for StupidTalk."
-        default:
-            return nil
-        }
     }
 
     private func problem(_ message: String, openSetup: Bool) {
@@ -578,9 +566,8 @@ final class DictationController {
 
     private static func friendly(_ error: Error) -> String {
         if let recorder = error as? RecorderError, let text = recorder.errorDescription { return text }
-        if let speech = error as? SpeechEngineError, let text = speech.errorDescription { return text }
         if error is Race.TimedOut { return "That took too long. Try again." }
         if error is CancellationError { return "Cancelled." }
-        return "Something went wrong. Try again."
+        return SpeechEngine.plainMessage(for: error)
     }
 }
