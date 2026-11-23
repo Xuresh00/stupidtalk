@@ -14,24 +14,77 @@ enum RecorderError: LocalizedError {
     }
 }
 
-/// Captures the microphone while the hold-to-talk key is down.
+/// Captures the microphone for the hold-to-talk key.
+///
+/// With `keepOpen` the microphone is opened once and stays open, so pressing the key does not
+/// start anything: no wait for the first word, and no audio-route change that makes music
+/// stutter or duck. While nobody is dictating, the last third of a second is kept in a small
+/// rolling buffer and put in front of the dictation, so the very first word is never cut.
+/// Without `keepOpen` the microphone is opened on the key press and closed afterwards.
 ///
 /// Starting and stopping happen on one private queue, in order, so a quick tap can
-/// never leave the microphone running.
-final class AudioRecorder {
+/// never leave a dictation running.
+final class AudioRecorder: @unchecked Sendable {
+    /// How much audio from just before the key press goes in front of a dictation.
+    static let preRollSeconds = 0.35
+
     private let queue = DispatchQueue(label: "com.stupidesigner.stupidtalk.audio")
     private var engine: AVAudioEngine?
+    private var engineUsesBuiltIn = true
+    private var configObserver: NSObjectProtocol?
 
-    /// `onBuffer` and `onLevel` are called on the audio thread. `completion` is called on the main thread.
+    // Shared with the audio thread, always behind `lock`.
+    private let lock = NSLock()
+    private var collector: SampleCollector?
+    private var levelHandler: (@Sendable (Float) -> Void)?
+    private var ring: [Float] = []
+    private let resampler = Resampler()
+
+    /// Opens the microphone without starting a dictation, so the next key press is instant.
+    /// Does nothing when it is already open the same way or a dictation is running.
+    func warmUp(preferBuiltInMicrophone: Bool) {
+        queue.async {
+            self.lock.lock()
+            let busy = self.collector != nil
+            self.lock.unlock()
+            if busy { return }
+            if let engine = self.engine, engine.isRunning, self.engineUsesBuiltIn == preferBuiltInMicrophone { return }
+            try? self.startOnQueue(preferBuiltInMicrophone: preferBuiltInMicrophone)
+        }
+    }
+
+    /// Closes the microphone when no dictation is running. For when "Instant start" is switched off.
+    func coolDown() {
+        queue.async {
+            self.lock.lock()
+            let busy = self.collector != nil
+            self.lock.unlock()
+            if !busy { self.stopOnQueue() }
+        }
+    }
+
+    /// Starts filling `collector` with 16 kHz samples. `onLevel` is called on the audio thread.
+    /// `completion` is called on the main thread.
     func start(
         preferBuiltInMicrophone: Bool,
-        onBuffer: @escaping @Sendable (AVAudioPCMBuffer) -> Void,
+        into collector: SampleCollector,
         onLevel: @escaping @Sendable (Float) -> Void,
         completion: @escaping @Sendable (Error?) -> Void
     ) {
         queue.async {
             do {
-                try self.startOnQueue(preferBuiltInMicrophone: preferBuiltInMicrophone, onBuffer: onBuffer, onLevel: onLevel)
+                let warm = self.engine?.isRunning == true && self.engineUsesBuiltIn == preferBuiltInMicrophone
+                if !warm {
+                    try self.startOnQueue(preferBuiltInMicrophone: preferBuiltInMicrophone)
+                }
+                self.lock.lock()
+                if warm {
+                    collector.append(self.ring)
+                }
+                self.ring.removeAll(keepingCapacity: true)
+                self.collector = collector
+                self.levelHandler = onLevel
+                self.lock.unlock()
                 DispatchQueue.main.async { completion(nil) }
             } catch {
                 DispatchQueue.main.async { completion(error) }
@@ -39,23 +92,27 @@ final class AudioRecorder {
         }
     }
 
-    /// `completion` is called on the main thread as soon as no more audio is coming.
-    /// Shutting the audio engine down happens after that, so it does not hold the text back.
-    func stop(completion: @escaping @Sendable () -> Void) {
-        queue.async {
-            let engine = self.engine
-            self.engine = nil
-            engine?.inputNode.removeTap(onBus: 0)
+    /// Keeps listening for `tail` seconds after the key came up, because people let go a moment
+    /// before the last word is really finished. `completion` is called on the main thread as soon
+    /// as no more audio is wanted. With `keepOpen` the microphone stays open for the next time.
+    func stop(tail: TimeInterval = 0, keepOpen: Bool = false, completion: @escaping @Sendable () -> Void) {
+        let work = {
+            self.lock.lock()
+            self.collector = nil
+            self.levelHandler = nil
+            self.ring.removeAll(keepingCapacity: true)
+            self.lock.unlock()
             DispatchQueue.main.async { completion() }
-            engine?.stop()
+            if !keepOpen { self.stopOnQueue() }
+        }
+        if tail > 0 {
+            queue.asyncAfter(deadline: .now() + tail, execute: work)
+        } else {
+            queue.async(execute: work)
         }
     }
 
-    private func startOnQueue(
-        preferBuiltInMicrophone: Bool,
-        onBuffer: @escaping @Sendable (AVAudioPCMBuffer) -> Void,
-        onLevel: @escaping @Sendable (Float) -> Void
-    ) throws {
+    private func startOnQueue(preferBuiltInMicrophone: Bool) throws {
         stopOnQueue()
         let engine = AVAudioEngine()
         let input = engine.inputNode
@@ -82,9 +139,8 @@ final class AudioRecorder {
 
         // No explicit format: the tap then always matches whatever the microphone delivers,
         // even right after the device was switched.
-        input.installTap(onBus: 0, bufferSize: 2048, format: nil) { buffer, _ in
-            onLevel(AudioRecorder.level(of: buffer))
-            onBuffer(buffer)
+        input.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
+            self?.handle(buffer)
         }
         engine.prepare()
         do {
@@ -94,13 +150,46 @@ final class AudioRecorder {
             throw RecorderError.couldNotStart(error.localizedDescription)
         }
         self.engine = engine
+        self.engineUsesBuiltIn = preferBuiltInMicrophone
+        // A device change (AirPods connecting, a mic plugged in) stops the engine. The app
+        // notices and opens it again within a couple of seconds.
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+        ) { _ in
+            Log.info("The audio device changed. The microphone will be opened again.")
+        }
+    }
+
+    /// Runs on the audio thread for every buffer the microphone delivers.
+    private func handle(_ buffer: AVAudioPCMBuffer) {
+        let samples = resampler.convert(buffer)
+        lock.lock()
+        let target = collector
+        let level = levelHandler
+        if target == nil {
+            ring.append(contentsOf: samples)
+            let limit = Int(16_000 * Self.preRollSeconds)
+            if ring.count > limit { ring.removeFirst(ring.count - limit) }
+        }
+        lock.unlock()
+        if let target {
+            target.append(samples)
+            level?(AudioRecorder.level(of: buffer))
+        }
     }
 
     private func stopOnQueue() {
+        if let configObserver {
+            NotificationCenter.default.removeObserver(configObserver)
+            self.configObserver = nil
+        }
         guard let engine else { return }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         self.engine = nil
+        lock.lock()
+        ring.removeAll(keepingCapacity: true)
+        lock.unlock()
     }
 
     /// Loudness of one buffer, squeezed into 0...1 for the little level bars.

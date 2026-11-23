@@ -56,6 +56,7 @@ final class AppState: ObservableObject {
         static let insertMethod = "insertMethod"
         static let trailingSpace = "addTrailingSpace"
         static let sounds = "playSounds"
+        static let instantStart = "instantStart"
         static let saveHistory = "saveHistory"
         static let setupFinished = "setupFinished"
         static let totalWords = "totalWords"
@@ -90,6 +91,10 @@ final class AppState: ObservableObject {
     }
     @Published var playSounds: Bool {
         didSet { defaults.set(playSounds, forKey: Keys.sounds) }
+    }
+    /// Keeps the microphone open so a dictation starts at once and music is never interrupted.
+    @Published var instantStart: Bool {
+        didSet { defaults.set(instantStart, forKey: Keys.instantStart) }
     }
     @Published var saveHistory: Bool {
         didSet { defaults.set(saveHistory, forKey: Keys.saveHistory) }
@@ -130,6 +135,7 @@ final class AppState: ObservableObject {
         insertMethod = InsertMethod(rawValue: defaults.string(forKey: Keys.insertMethod) ?? "") ?? .type
         addTrailingSpace = defaults.object(forKey: Keys.trailingSpace) as? Bool ?? true
         playSounds = defaults.object(forKey: Keys.sounds) as? Bool ?? false
+        instantStart = defaults.object(forKey: Keys.instantStart) as? Bool ?? true
         saveHistory = defaults.object(forKey: Keys.saveHistory) as? Bool ?? true
         setupFinished = defaults.bool(forKey: Keys.setupFinished)
         totalWords = defaults.integer(forKey: Keys.totalWords)

@@ -159,8 +159,18 @@ struct SettingsView: View {
         .onChange(of: state.hotkey) { _, _ in
             controller.refreshStatus()
         }
+        .onChange(of: state.instantStart) { _, _ in
+            controller.refreshStatus()
+        }
+        .onChange(of: state.microphone) { _, _ in
+            controller.refreshStatus()
+        }
 
         Card {
+            SettingRow("Instant start", detail: "Keeps the microphone open while StupidTalk runs, so there is no wait when you press the key and your music is never interrupted or turned down. macOS shows its orange microphone dot the whole time. Nothing is saved or sent: StupidTalk only holds the last third of a second.") {
+                switchControl($state.instantStart)
+            }
+            Divide()
             SettingRow("Microphone", detail: "This Mac's microphone keeps AirPods in music quality and starts faster. Pick System default for an external mic.") {
                 Picker("", selection: $state.microphone) {
                     ForEach(MicrophoneChoice.allCases, id: \.self) { choice in

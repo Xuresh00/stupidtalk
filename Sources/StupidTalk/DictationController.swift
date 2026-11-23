@@ -18,6 +18,10 @@ final class DictationController {
         min(4.0, 1.5 + 0.015 * Double(words))
     }
 
+    /// People let go of the key a moment before the last word is finished.
+    /// The microphone keeps listening this long after the key comes up.
+    private static let tailSeconds = 0.35
+
     /// How long the Copy button stays in the pill after the words are typed.
     private static let copySeconds = 2.0
 
@@ -103,12 +107,24 @@ final class DictationController {
             hotkeys.start()
             Log.info("Accessibility permission granted")
         }
+        syncMicrophone()
         // The on-device model is asked about in the background, never here on the main thread.
         ticks += 1
         if ticks % 15 == 0 { refreshAIStatus() }
         let ai = cleaner.status
         if state.aiStatus != ai { state.aiStatus = ai }
         if hotkeys.choice != state.hotkey { hotkeys.choice = state.hotkey }
+    }
+
+    /// With Instant start the microphone is kept open between dictations. This also opens it
+    /// again after a device change or a wake from sleep, because it runs every couple of seconds.
+    private func syncMicrophone() {
+        guard current == nil else { return }
+        if state.instantStart && Permissions.microphone == .granted {
+            recorder.warmUp(preferBuiltInMicrophone: state.microphone == .builtIn)
+        } else {
+            recorder.coolDown()
+        }
     }
 
     private func refreshAIStatus() {
@@ -327,14 +343,10 @@ final class DictationController {
     }
 
     private func startRecording(_ session: Session) {
-        let samples = session.samples
-        let resampler = Resampler()
         let model = overlay.model
         recorder.start(
             preferBuiltInMicrophone: state.microphone == .builtIn,
-            onBuffer: { buffer in
-                samples.append(resampler.convert(buffer))
-            },
+            into: session.samples,
             onLevel: { level in
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
@@ -392,7 +404,7 @@ final class DictationController {
         stopWatchingForRelease()
         state.phase = .transcribing
         overlay.show(.thinking)
-        recorder.stop { [weak self] in
+        recorder.stop(tail: Self.tailSeconds, keepOpen: state.instantStart) { [weak self] in
             Task { @MainActor in
                 self?.process(session)
             }
@@ -405,7 +417,7 @@ final class DictationController {
         session.cancelled = true
         stopWatchingForRelease()
         Log.info("Cancelled")
-        recorder.stop {}
+        recorder.stop(keepOpen: state.instantStart) {}
         overlay.hide()
         end(session)
     }
@@ -524,7 +536,7 @@ final class DictationController {
         session.released = true
         session.cancelled = true
         stopWatchingForRelease()
-        recorder.stop {}
+        recorder.stop(keepOpen: state.instantStart) {}
         problem(Self.friendly(error), openSetup: false)
         end(session)
     }
